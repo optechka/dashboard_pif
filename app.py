@@ -913,6 +913,15 @@ def db_to_excel(df: pd.DataFrame) -> bytes:
 # =============================================================================
 
 PLOTLY_CONFIG = {"displayModeBar": False, "locale": "ru"}
+
+# Совместимость с разными версиями Streamlit: в новых версиях параметр
+# use_container_width устарел и заменён на width="stretch".
+try:
+    _ST_VER = tuple(int(x) for x in re.findall(r"\d+", st.__version__)[:2])
+except Exception:  # noqa: BLE001
+    _ST_VER = (1, 99)
+WIDE = {"width": "stretch"} if _ST_VER >= (1, 50) else {"use_container_width": True}
+CHART_W = {} if _ST_VER >= (1, 50) else {"use_container_width": True}
 PALETTE = ["#2E5BFF", "#00A389", "#F2A900", "#E5484D", "#8E4EC6", "#0091FF",
            "#F76B15", "#30A46C", "#D6409F", "#6E56CF", "#12A594", "#978365",
            "#5B6B7F", "#B5A642", "#3E63DD", "#A0A9B4"]
@@ -997,7 +1006,7 @@ def sidebar(db: pd.DataFrame) -> tuple[list[str], list[str]]:
     sb.header("🔄 Обновление данных")
     force = sb.checkbox("Не использовать кэш (загрузить заново)", value=False,
                         help="Данные с сайта кэшируются на 24 часа.")
-    if sb.button("Обновить данные с Investfunds.ru", type="primary", use_container_width=True):
+    if sb.button("Обновить данные с Investfunds.ru", type="primary", **WIDE):
         with sb:
             new, errors = run_update(FUNDS_URLS, force)
         st.session_state.db = replace_funds(st.session_state.db, new)
@@ -1012,7 +1021,7 @@ def sidebar(db: pd.DataFrame) -> tuple[list[str], list[str]]:
         st.caption("Сканирует каталог Investfunds.ru, находит фонды категорий «акции» и "
                    "«смешанные инвестиции» и добавляет их к анализу.")
         max_new = st.number_input("Максимум новых фондов", min_value=5, max_value=200, value=30, step=5)
-        if st.button("Найти и загрузить фонды", use_container_width=True):
+        if st.button("Найти и загрузить фонды", **WIDE):
             with st.spinner("Сканирование каталога…"):
                 found, cat_errors = discover_all_equity_funds()
             known = set(FUNDS_URLS.values()) | set(st.session_state.db[C_URL].dropna())
@@ -1050,7 +1059,7 @@ def sidebar(db: pd.DataFrame) -> tuple[list[str], list[str]]:
     if up is not None:
         mode = sb.radio("Как применить файл", ["Добавить к базе (заменить совпадающие фонды)",
                                                "Полностью заменить базу"])
-        if sb.button("Применить файл", use_container_width=True):
+        if sb.button("Применить файл", **WIDE):
             try:
                 user_df = read_user_file(up)
                 if user_df.empty:
@@ -1072,12 +1081,12 @@ def sidebar(db: pd.DataFrame) -> tuple[list[str], list[str]]:
     db_now = st.session_state.db
     sb.download_button("Скачать текущую базу (CSV)", data=db_to_csv(db_now),
                        file_name=f"pif_akcii_{datetime.now():%Y%m%d}.csv", mime="text/csv",
-                       use_container_width=True)
+                       **WIDE)
     sb.download_button("Скачать текущую базу (Excel)", data=db_to_excel(db_now),
                        file_name=f"pif_akcii_{datetime.now():%Y%m%d}.xlsx",
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                       use_container_width=True)
-    if sb.button("Сбросить к встроенной базе", use_container_width=True):
+                       **WIDE)
+    if sb.button("Сбросить к встроенной базе", **WIDE):
         st.session_state.db = build_default_db().copy()
         st.session_state.pop("update_log", None)
         st.rerun()
@@ -1153,7 +1162,7 @@ def tab_funds(fdb: pd.DataFrame) -> None:
             annotations=[dict(text=f"СЧА<br><b>{fmt_ru(head[C_NAV], 0)}</b><br>млн руб.",
                               showarrow=False, font=dict(size=14))],
         )
-        st.plotly_chart(fig, use_container_width=True, config=PLOTLY_CONFIG)
+        st.plotly_chart(fig, config=PLOTLY_CONFIG, **CHART_W)
     with g2:
         sec = fd.groupby(C_SECTOR, as_index=False)[[C_WEIGHT, C_VALUE]].sum().sort_values(C_WEIGHT)
         fig_s = px.bar(sec, x=C_WEIGHT, y=C_SECTOR, orientation="h", text=C_WEIGHT,
@@ -1166,7 +1175,7 @@ def tab_funds(fdb: pd.DataFrame) -> None:
             title=dict(text="Распределение по секторам", x=0, font=dict(size=15)),
             xaxis_title="Доля в фонде, %", yaxis_title=None, showlegend=False,
         )
-        st.plotly_chart(fig_s, use_container_width=True, config=PLOTLY_CONFIG)
+        st.plotly_chart(fig_s, config=PLOTLY_CONFIG, **CHART_W)
 
     st.markdown("#### Все позиции фонда")
     q = st.text_input("Поиск по позициям", placeholder="Тикер, компания или сектор…", key="q_fund")
@@ -1176,7 +1185,7 @@ def tab_funds(fdb: pd.DataFrame) -> None:
                "Сортировка — щелчком по заголовку колонки.")
     st.dataframe(
         styled(table, pct_cols=[C_WEIGHT], mln_cols=[C_VALUE]),
-        use_container_width=True, hide_index=True, height=min(38 + 35 * max(len(table), 1), 640),
+        **WIDE, hide_index=True, height=min(38 + 35 * max(len(table), 1), 640),
     )
 
 
@@ -1234,7 +1243,7 @@ def tab_stocks(fdb: pd.DataFrame) -> None:
         xaxis_title=x_title, yaxis_title=None,
         legend=dict(title=dict(text="Управляющая компания"), orientation="h", y=-0.15),
     )
-    st.plotly_chart(fig, use_container_width=True, config=PLOTLY_CONFIG)
+    st.plotly_chart(fig, config=PLOTLY_CONFIG, **CHART_W)
 
     st.markdown("#### Фонды-держатели")
     table = holders.rename(columns={
@@ -1246,7 +1255,7 @@ def tab_stocks(fdb: pd.DataFrame) -> None:
     table = search_filter(table, q, ["Название фонда", C_UK, C_TYPE])
     st.dataframe(
         styled(table, pct_cols=["Доля в портфеле, %"], mln_cols=["Оценочная стоимость пакета, млн руб."]),
-        use_container_width=True, hide_index=True,
+        **WIDE, hide_index=True,
         height=min(38 + 35 * max(len(table), 1), 640),
         column_config={"Ссылка на фонд": st.column_config.LinkColumn(
             "Ссылка на фонд", display_text="Открыть на Investfunds.ru")},
@@ -1264,7 +1273,7 @@ def tab_stocks(fdb: pd.DataFrame) -> None:
                           "<br>Средняя доля: %{customdata[1]:.2f} %<extra></extra>")
         fig_t.update_layout(separators=", ", height=640, margin=dict(t=20, b=10, l=10, r=60),
                             xaxis_title="Суммарная стоимость пакетов, млн руб.", yaxis_title=None)
-        st.plotly_chart(fig_t, use_container_width=True, config=PLOTLY_CONFIG)
+        st.plotly_chart(fig_t, config=PLOTLY_CONFIG, **CHART_W)
 
 
 def main() -> None:
