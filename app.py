@@ -766,7 +766,9 @@ def parse_fund_html(html: str) -> dict:
             if val and val > 1e5:
                 info["nav_mln"] = round(val / 1e6, 2)
 
-    m = re.search(r"Структура фонда на\s*(\d{2}\.\d{2}\.\d{4})", text)
+    m = re.search(r"Структура\s+фонда\s+на\s*(\d{2}\.\d{2}\.\d{4})", text)
+    if not m:  # дата может стоять в соседнем элементе
+        m = re.search(r"Структура\s+фонда[^\d]{0,120}?(\d{2}\.\d{2}\.\d{4})", text)
     if m:
         info["struct_date"] = m.group(1)
 
@@ -784,8 +786,8 @@ def _rows_from_parsed(fund: str, url: str, info: dict) -> list[dict]:
         C_UK: meta.get("uk") or info["uk"] or "Не указана",
         C_TYPE: info["type"] or meta.get("type") or "ОПИФ",
         C_NAV: nav,
-        C_DATE: info["struct_date"] or info["nav_date"] or datetime.now().strftime("%d.%m.%Y"),
-        C_NAV_DATE: info["nav_date"] or info["struct_date"] or "—",
+        C_DATE: info["struct_date"] or "—",
+        C_NAV_DATE: info["nav_date"] or "—",
         C_URL: url, C_SOURCE: SRC_SITE,
     }
     merged: dict[tuple, dict] = {}
@@ -1023,6 +1025,7 @@ SRC_UK_PAGE = "Сайт УК: страница фонда"
 UK_PAGES: dict[str, str] = {
     "ВИМ — Индекс МосБиржи (ОПИФ)": "https://www.wealthim.ru/products/pif/opif/wimfimb/",
     "ВИМ — Акции": "https://www.wealthim.ru/products/pif/opif/wimfa/",
+    "Первая — Фонд акций с выплатой дохода": "https://first-am.ru/individuals/fund/stock-fund-with-income-payment",
     "Альфа-Капитал — Ликвидные акции": "https://www.alfacapital.ru/individual/pifs/opifa_akliq",
     "Альфа-Капитал — Акции компаний роста": "https://www.alfacapital.ru/individual/pifs/opif_ak_growth",
     "Альфа-Капитал — Акции с выплатой дохода": "https://www.alfacapital.ru/individual/pifs/opif_akstockip",
@@ -1455,13 +1458,64 @@ def rows_from_report(fund: str, meta: dict, rep: dict, doc_url: str) -> list[dic
 
 
 _STRUCT_HEADINGS = ("структура активов", "портфель фонда", "состав фонда", "структура портфеля",
-                    "топ-10 эмитентов", "состав портфеля", "крупнейшие позиции")
+                    "топ-10 эмитентов", "состав портфеля", "крупнейшие позиции", "крупных позиций",
+                    "крупнейших позиций", "крупнейшие эмитенты", "основные позиции", "топ-10")
 _ASSET_CLASS_WORDS = {"акции", "облигации", "денежные средства", "прочее", "прочие активы",
                       "депозиты", "паи", "иное", "дебиторская задолженность", "валюта"}
 
 
+def _structure_from_scripts(html: str) -> dict:
+    """
+    Многие сайты УК рисуют диаграммы скриптами, а данные передают в JSON внутри страницы
+    (например, {"name":"Лукойл","value":9.9}). Ищем такие пары и оставляем только эмитентов.
+    """
+    raw = re.sub(r"\\u([0-9a-fA-F]{4})", lambda m: chr(int(m.group(1), 16)), html)
+    name_k = r"(?:name|title|label|issuer|emitent|text|company)"
+    val_k = r"(?:value|share|percent|percentage|weight|y|part|proportion|dolya)"
+    pats = [
+        re.compile(r"[\"']?" + name_k + r"[\"']?\s*:\s*[\"']([^\"'<>{}\\]{2,60})[\"'][^{}]{0,200}?[\"']?"
+                   + val_k + r"[\"']?\s*:\s*[\"']?(\d{1,3}(?:[.,]\d{1,6})?)", re.I),
+        re.compile(r"[\"']?" + val_k + r"[\"']?\s*:\s*[\"']?(\d{1,3}(?:[.,]\d{1,6})?)[\"']?[^{}]{0,200}?[\"']?"
+                   + name_k + r"[\"']?\s*:\s*[\"']([^\"'<>{}\\]{2,60})[\"']", re.I),
+    ]
+    found, first_pos = [], None
+    for k, pat in enumerate(pats):
+        for m in pat.finditer(raw):
+            name, val = (m.group(1), m.group(2)) if k == 0 else (m.group(2), m.group(1))
+            w = parse_number(val)
+            if w is None:
+                continue
+            found.append((m.start(), name.strip(), w))
+    found.sort()
+    items, cash, seen = [], None, set()
+    for pos, name, w in found:
+        if _CASH_RE.search(name):
+            cash = w if cash is None else cash
+            continue
+        clean = re.sub(r"(?i)\s+(ао|ап|обыкн\.?|прив\.?)$", "", name)
+        if _JUNK_RE.search(name) or not resolve_ticker(clean) or name.lower() in seen:
+            continue
+        seen.add(name.lower())
+        items.append((name, w))
+        first_pos = pos if first_pos is None else first_pos
+    if items and all(w <= 1 for _, w in items) and sum(w for _, w in items) <= 1.05:
+        items = [(n, w * 100) for n, w in items]  # доли переданы в долях единицы
+        cash = cash * 100 if cash is not None and cash <= 1 else cash
+    date = None
+    if first_pos is not None:
+        window = raw[max(0, first_pos - 4000): first_pos + 4000]
+        dates = [d for d in (_extract_date(m.group(0)) for m in
+                             re.finditer(r"\d{2}\.\d{2}\.\d{4}|\d{4}-\d{2}-\d{2}", window))
+                 if d and d <= datetime.now()]
+        if dates:
+            date = max(dates).strftime("%d.%m.%Y")
+    items = [(n, w) for n, w in items if 0 < w <= 100]
+    return dict(items=items if len(items) >= 3 else [], date=date, cash=cash)
+
+
 def parse_uk_structure_html(html: str) -> dict:
     """Извлекает пары «эмитент — доля, %» из блока структуры портфеля на странице фонда УК."""
+    from_scripts = _structure_from_scripts(html)
     soup = BeautifulSoup(html, "html.parser")
     for tag in soup(["script", "style", "noscript"]):
         tag.decompose()
@@ -1478,8 +1532,8 @@ def parse_uk_structure_html(html: str) -> dict:
                 m = _DATE_RE.search(line)
                 if m:
                     date = m.group(1)
-            m_pct = re.fullmatch(r"(\d{1,3}[.,]\d{1,4})\s*%", line)
-            m_pair = re.fullmatch(r"(.{2,80}?)[\s:–-]+(\d{1,3}[.,]\d{1,4})\s*%", line)
+            m_pct = re.fullmatch(r"(\d{1,3}(?:[.,]\d{1,4})?)\s*%", line)
+            m_pair = re.fullmatch(r"(.{2,80}?)[\s:–-]+(\d{1,3}(?:[.,]\d{1,4})?)\s*%", line)
             if m_pct and prev:
                 name, w = prev, parse_number(m_pct.group(1))
             elif m_pair:
@@ -1500,6 +1554,8 @@ def parse_uk_structure_html(html: str) -> dict:
             items.append((name.strip(), w))
         if len(items) >= 3 and len(items) > len(best["items"]):
             best = dict(items=items, date=date, cash=cash)
+    if len(from_scripts["items"]) > len(best["items"]):
+        best = from_scripts
     return best
 
 
@@ -1536,6 +1592,53 @@ def rows_from_uk_page(fund: str, meta: dict, st_: dict, nav_mln, nav_date, page_
     return rows
 
 
+# «Точки входа» на сайтах УК: страницы, где есть ссылки на страницы отдельных фондов
+UK_SEED_PAGES: dict[str, list[str]] = {
+    "Первая": ["https://first-am.ru/individuals/fund/stock-fund-with-income-payment"],
+    "ВИМ Инвестиции": ["https://www.wealthim.ru/products/pif/opif/", "https://www.wealthim.ru/products/pif/opif/wimfimb/"],
+    "Альфа-Капитал": ["https://www.alfacapital.ru/individual/pifs", "https://www.alfacapital.ru/individual/bpifs"],
+    "Т-Капитал": ["https://t-capital-funds.ru/"],
+    "АТОН": ["https://www.am-aton.ru/"],
+    "ПСБ Управление активами": ["https://www.upravlyaem.ru/"],
+}
+
+
+def _strip_uk_prefix(fund: str) -> str:
+    s = re.sub(r"\([A-Z]{3,5}\)", " ", fund)
+    return re.sub(r"^[^—–]+[—–]\s*", "", s).strip() if re.search(r"[—–]", s) else s
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _uk_links(seed_url: str) -> list[tuple[str, str]]:
+    """Ссылки (текст, адрес) со страницы УК на её же домене."""
+    from urllib.parse import urljoin, urlparse
+    soup = BeautifulSoup(fetch_text(seed_url), "html.parser")
+    host = urlparse(seed_url).netloc.replace("www.", "")
+    out = []
+    for a in soup.find_all("a", href=True):
+        text = a.get_text(" ", strip=True)
+        url = urljoin(seed_url, a["href"]).split("#")[0]
+        if len(text) >= 4 and urlparse(url).netloc.replace("www.", "") == host and urlparse(url).path.count("/") >= 2:
+            out.append((text, url))
+    return out
+
+
+def resolve_uk_page(fund: str, uk: str | None) -> str | None:
+    """Находит страницу фонда на сайте УК по ссылкам с её «точек входа»."""
+    target = _strip_uk_prefix(fund)
+    best, best_score = None, 0.0
+    for seed in UK_SEED_PAGES.get(uk or "", []):
+        try:
+            links = _uk_links(seed)
+        except Exception:  # noqa: BLE001
+            continue
+        if links:
+            i, score = match_fund_by_title(target, [t for t, _ in links], with_score=True)
+            if score > best_score:
+                best, best_score = links[i][1], score
+    return best if best_score >= 0.75 else None
+
+
 def _catalog_url_for(fund: str) -> str | None:
     """Ищет страницу фонда на Investfunds.ru в загруженном каталоге по похожему названию."""
     try:
@@ -1549,11 +1652,19 @@ def _catalog_url_for(fund: str) -> str | None:
     return cat.iloc[i][C_URL] if score >= 0.5 else None
 
 
+def _date_key(d: str | None) -> datetime:
+    try:
+        return datetime.strptime(d, "%d.%m.%Y")
+    except (TypeError, ValueError):
+        return datetime(1900, 1, 1)
+
+
 def load_fund_composition(fund: str, meta: dict) -> tuple[list[dict], str, list[str]]:
     """
-    Загружает состав фонда по цепочке источников:
+    Собирает состав фонда из всех доступных источников и выбирает САМЫЙ СВЕЖИЙ по дате состава;
+    при одинаковой дате — более полный:
       1) справка о СЧА с сайта УК (полный состав);
-      2) блок структуры портфеля на странице фонда на сайте УК;
+      2) структура портфеля на странице фонда на сайте УК;
       3) ТОП-10 с Investfunds.ru.
     Возвращает (строки базы, описание источника, журнал попыток).
     """
@@ -1574,7 +1685,11 @@ def load_fund_composition(fund: str, meta: dict) -> tuple[list[dict], str, list[
                    "(загрузите список фондов или впишите адрес в FUNDS_URLS)")
     nav_mln = (info or {}).get("nav_mln") or meta.get(C_NAV) or FUND_META.get(fund, {}).get("nav")
     nav_date = (info or {}).get("nav_date") or meta.get(C_NAV_DATE)
-    uk_url = UK_PAGES.get(fund) or (info or {}).get("uk_link")
+    uk_name = meta.get(C_UK) or FUND_META.get(fund, {}).get("uk")
+    uk_url = UK_PAGES.get(fund) or (info or {}).get("uk_link") or resolve_uk_page(fund, uk_name)
+
+    # (дата состава, полнота, строки, описание)
+    candidates: list[tuple[datetime, int, list[dict], str]] = []
 
     # 1. Справка о СЧА
     report_urls: list[str] = []
@@ -1582,17 +1697,15 @@ def load_fund_composition(fund: str, meta: dict) -> tuple[list[dict], str, list[
         u = tcap_report_url(*TCAP_REPORTS[fund])
         if u:
             report_urls.append(u)
-        else:
-            log.append("Т-Капитал: справка о СЧА за последние месяцы не найдена")
     uk_failed = False
     if uk_url:
         try:
             report_urls += [u for u in discover_reports(uk_url) if u not in report_urls]
         except Exception as exc:  # noqa: BLE001
             uk_failed = True
-            log.append(f"Сайт УК: {exc}")
-    elif fund not in TCAP_REPORTS:
-        log.append("Сайт УК: адрес страницы фонда не найден")
+            log.append(f"Сайт УК ({uk_url}): {exc}")
+    else:
+        log.append("Сайт УК: страница фонда не найдена")
     for u in report_urls[:3]:
         try:
             rep = parse_scha_pdf(fetch_bytes(u))
@@ -1600,19 +1713,23 @@ def load_fund_composition(fund: str, meta: dict) -> tuple[list[dict], str, list[
             log.append(f"Справка {u.rsplit('/', 1)[-1]}: {exc}")
             continue
         if rep["nav"] and len(rep["items"]) >= 3:
-            return rows_from_report(fund, meta, rep, u), f"{SRC_UK_REPORT} на {rep['date'] or '—'}", log
+            candidates.append((_date_key(rep["date"]), 3, rows_from_report(fund, meta, rep, u),
+                               f"{SRC_UK_REPORT} на {rep['date'] or '—'}"))
+            break
         log.append(f"Справка {u.rsplit('/', 1)[-1]}: не удалось разобрать таблицу акций")
     if uk_url and not report_urls and not uk_failed:
-        log.append("Сайт УК: ссылки на справки о СЧА на странице не найдены")
+        log.append("Сайт УК: ссылки на справки о СЧА не найдены")
 
     # 2. Структура на странице фонда УК
     if uk_url and not uk_failed:
         try:
             st_ = parse_uk_structure_html(fetch_text(uk_url))
             if st_["items"]:
-                return (rows_from_uk_page(fund, meta, st_, nav_mln, nav_date, uk_url),
-                        f"{SRC_UK_PAGE} на {st_['date'] or '—'}", log)
-            log.append("Сайт УК: блок структуры портфеля не найден (возможно, загружается скриптом)")
+                candidates.append((_date_key(st_["date"]), 2,
+                                   rows_from_uk_page(fund, meta, st_, nav_mln, nav_date, uk_url),
+                                   f"{SRC_UK_PAGE} на {st_['date'] or '—'}"))
+            else:
+                log.append("Сайт УК: структура портфеля на странице не найдена")
         except Exception as exc:  # noqa: BLE001
             log.append(f"Сайт УК: {exc}")
 
@@ -1623,10 +1740,25 @@ def load_fund_composition(fund: str, meta: dict) -> tuple[list[dict], str, list[
             r[C_UK] = meta.get(C_UK) or r[C_UK]
             r[C_TYPE] = meta.get(C_TYPE) or r[C_TYPE]
             r[C_DOC] = inv_url
-        return rows, f"{SRC_SITE} (ТОП-10)", log
-    if info is not None:
+        candidates.append((_date_key(info["struct_date"]), 1, rows,
+                           f"{SRC_SITE} (ТОП-10) на {info['struct_date'] or '—'}"))
+    elif info is not None:
         log.append("Investfunds.ru: таблица ТОП-активов не найдена")
-    return [], "", log
+
+    if not candidates:
+        return [], "", log
+    candidates.sort(key=lambda c: (c[0], c[1]), reverse=True)
+    best = candidates[0]
+    if len(candidates) > 1:
+        log.append("Выбран самый свежий источник. Другие: " + "; ".join(c[3] for c in candidates[1:]))
+    rows = best[2]
+    for r in rows:  # СЧА и её дата — самые свежие (с Investfunds.ru), доли — из выбранного источника
+        if nav_mln and r.get(C_NAV) != nav_mln and best[1] != 3:
+            r[C_NAV] = nav_mln
+            r[C_VALUE] = round(nav_mln * r[C_WEIGHT] / 100, 2) if r.get(C_WEIGHT) is not None else None
+        if nav_date and best[1] != 3:
+            r[C_NAV_DATE] = nav_date
+    return rows, best[3], log
 
 
 def match_fund_by_title(title: str | None, candidates: list[str], with_score: bool = False):
@@ -2300,11 +2432,12 @@ def tab_funds(fdb: pd.DataFrame, meta: pd.DataFrame) -> None:
         m[0].metric("Фондов / управляющих компаний", f"{sm['n_funds']} / {sm['n_uk']}",
                     help=f"Типы фондов: {sm['n_types']}")
         m[1].metric("Суммарная СЧА", fmt_mln(nav, 0), help=f"Даты СЧА: {sm['nav_dates']}")
-        m[2].metric("Дата данных", sm["struct_dates"], help=f"Даты структуры портфелей. СЧА — {sm['nav_dates']}.")
+        m[2].metric("Состав на", sm["struct_dates"], help=f"Даты структуры портфелей. СЧА — {sm['nav_dates']}.")
     else:
         m[0].metric(f"Управляющая компания · {head[C_TYPE]}", head[C_UK])
-        m[1].metric("СЧА", fmt_mln(nav, 0), help=f"Стоимость чистых активов на {head[C_NAV_DATE]}")
-        m[2].metric("Дата данных", head[C_DATE], help=f"Дата структуры портфеля. СЧА — на {head[C_NAV_DATE]}.")
+        m[1].metric(f"СЧА на {head[C_NAV_DATE]}", fmt_mln(nav, 0), help="Стоимость чистых активов фонда")
+        m[2].metric("Состав на", head[C_DATE] if head[C_DATE] not in (None, "") else "—",
+                    help="Дата, на которую раскрыта структура портфеля в источнике данных")
     m[3].metric("Акций", f"{len(equities)}")
     m[4].metric("Доля ТОП-10", fmt_pct(equities.head(10)[C_WEIGHT].sum(), 1),
                 help="Суммарная доля десяти крупнейших акций")
