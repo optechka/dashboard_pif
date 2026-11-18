@@ -22,7 +22,9 @@ from __future__ import annotations
 import io
 import random
 import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 import pandas as pd
@@ -65,9 +67,15 @@ SRC_USER = "Файл пользователя"
 NO_TICKER = "—"
 ASSET_EQUITY = "Акции"
 ASSET_BONDS = "Облигации"
-ASSET_OTHER = "Прочее"
+ASSET_CASH = "Денежные средства"
+ASSET_OTHER = "Прочие активы"
 
 BASE_URL = "https://investfunds.ru"
+
+# Автозагрузка при открытии дашборда
+AUTO_CATALOG_PAGES = 20   # сколько страниц каталога Investfunds.ru (по 50 фондов) просматривать
+AUTO_MAX_FUNDS = 300      # предел числа фондов, составы которых загружаются автоматически
+LOAD_WORKERS = 4          # параллельных загрузок (больше — быстрее, но выше риск блокировки сайтом)
 CATALOG_URL = "https://investfunds.ru/funds/"
 
 HEADERS = {
@@ -124,7 +132,8 @@ S_MED = "Здравоохранение"
 S_HOLD = "Холдинги"
 S_IND = "Промышленность"
 S_BONDS = "Облигации"
-S_CASH = "Денежные средства и прочее"
+S_CASH = "Денежные средства"
+S_OTHER_ASSETS = "Прочие активы"
 S_OTHER = "Прочие отрасли"
 
 # --- Справочник эмитентов: тикер МосБиржи → (название на русском, сектор) ---
@@ -186,8 +195,9 @@ SPECIAL_ROWS: dict[str, tuple[str, str, str]] = {
     "#OFZ": ("ОФЗ (государственные облигации)", S_BONDS, ASSET_BONDS),
     "#CORP": ("Корпоративные облигации", S_BONDS, ASSET_BONDS),
 }
-CASH_NAME = "Денежные средства и прочие активы"
-REST_NAME = "Прочие активы (вне раскрытого ТОП-10)"
+CASH_NAME = "Денежные средства"
+OTHER_NAME = "Прочие активы"
+REST_NAME = OTHER_NAME
 
 # --- Синонимы названий эмитентов на Investfunds.ru → тикер ---
 ALIASES: dict[str, str] = {
@@ -538,10 +548,65 @@ def _rows_for_fund(fund: str, holdings: dict[str, float], cash_min: float) -> li
     cash = round(100.0 - sum(r[C_WEIGHT] for r in rows), 2)
     if cash > 0.005:
         rows.append({**common, C_TICKER: NO_TICKER, C_COMPANY: CASH_NAME, C_SECTOR: S_CASH,
-                     C_ASSET: ASSET_OTHER, C_WEIGHT: cash})
+                     C_ASSET: ASSET_CASH, C_WEIGHT: cash})
     for r in rows:
         r[C_VALUE] = round(nav * r[C_WEIGHT] / 100.0, 2)
     return rows
+
+
+# Строки, которые не могут быть позицией портфеля (показатели доходности, отрасли, итоги)
+_JUNK_RE = re.compile(r"динамик|доходност|изменени|стоимост\w*\s+пая|\bсча\b|\bпа[яйиюе]\b|индекс|"
+                      r"отрасл|промышленност|\bитого\b|\bвсего\b|структур|за\s+(?:месяц|год)", re.I)
+_CASH_RE = re.compile(r"^\s*(?:денежн|депозит)", re.I)
+
+
+def normalize_positions(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Приводит состав каждого фонда к виду: акции + одна строка «Денежные средства»
+    + одна строка «Прочие активы» (облигации, паи, нераскрытые позиции и т. п.).
+    Строки-показатели («Динамика пая», отрасли и т. п.) отбрасываются.
+    """
+    if df is None or df.empty:
+        return df
+    out = []
+    for _, g in df.groupby(C_FUND, sort=False):
+        base = g.iloc[0].to_dict()
+        nav = base.get(C_NAV)
+        nav = None if nav is None or pd.isna(nav) else float(nav)
+        comp = g[C_COMPANY].astype(str)
+        is_eq = g[C_ASSET] == ASSET_EQUITY
+        junk = comp.str.contains(_JUNK_RE) & (g[C_TICKER].fillna(NO_TICKER) == NO_TICKER)
+        eq = g[is_eq & ~junk].copy()
+        # повторы одной и той же строки (дубли блоков на сайте) — убрать; части одной бумаги — сложить
+        eq = eq.drop_duplicates(subset=[C_TICKER, C_COMPANY, C_WEIGHT])
+        if eq.duplicated(subset=[C_TICKER, C_COMPANY]).any():
+            first = eq.drop_duplicates(subset=[C_TICKER, C_COMPANY]).set_index([C_TICKER, C_COMPANY])
+            sums = eq.groupby([C_TICKER, C_COMPANY])[[C_WEIGHT, C_VALUE]].sum(min_count=1)
+            first[[C_WEIGHT, C_VALUE]] = sums
+            eq = first.reset_index()[g.columns]
+        non = g[~is_eq & ~junk]
+        cash_w = float(non.loc[(non[C_ASSET] == ASSET_CASH) | comp[non.index].str.contains(_CASH_RE),
+                               C_WEIGHT].sum())
+        eq_w = float(eq[C_WEIGHT].sum())
+        if eq_w + cash_w > 100.5:  # доли не могут в сумме превышать 100 %
+            k = 100.0 / (eq_w + cash_w)
+            eq[C_WEIGHT] = eq[C_WEIGHT] * k
+            cash_w *= k
+            eq_w *= k
+            if nav:
+                eq[C_VALUE] = (nav * eq[C_WEIGHT] / 100).round(2)
+        other_w = max(0.0, 100.0 - eq_w - cash_w)
+        out.append(eq)
+        common = {c: base.get(c) for c in (C_FUND, C_UK, C_TYPE, C_NAV, C_DATE, C_NAV_DATE, C_URL,
+                                           C_SOURCE, C_DOC)}
+        for name, sector, asset, w in ((CASH_NAME, S_CASH, ASSET_CASH, cash_w),
+                                       (OTHER_NAME, S_OTHER_ASSETS, ASSET_OTHER, other_w)):
+            if w > 0.005:
+                out.append(pd.DataFrame([{**common, C_TICKER: NO_TICKER, C_COMPANY: name, C_SECTOR: sector,
+                                          C_ASSET: asset, C_WEIGHT: round(w, 4),
+                                          C_VALUE: round(nav * w / 100, 2) if nav else None}]))
+    res = pd.concat(out, ignore_index=True)
+    return res.reindex(columns=ALL_COLS)
 
 
 @st.cache_data(show_spinner=False)
@@ -558,7 +623,7 @@ def build_default_db() -> pd.DataFrame:
             rows += _rows_for_fund(fund, holdings, cash_min=0.4)
         else:
             rows += _rows_for_fund(fund, ACTIVE_HOLDINGS[fund], cash_min=1.5)
-    return pd.DataFrame(rows, columns=ALL_COLS)
+    return normalize_positions(pd.DataFrame(rows, columns=ALL_COLS))
 
 
 # =============================================================================
@@ -739,7 +804,7 @@ def _rows_from_parsed(fund: str, url: str, info: dict) -> list[dict]:
             r[C_WEIGHT] *= 100.0 / total
     rest = round(100.0 - sum(r[C_WEIGHT] for r in rows), 2)
     if rest > 0.05:
-        rows.append({**common, C_TICKER: NO_TICKER, C_COMPANY: REST_NAME, C_SECTOR: S_CASH,
+        rows.append({**common, C_TICKER: NO_TICKER, C_COMPANY: OTHER_NAME, C_SECTOR: S_OTHER_ASSETS,
                      C_ASSET: ASSET_OTHER, C_WEIGHT: rest})
     for r in rows:
         r[C_WEIGHT] = round(r[C_WEIGHT], 2)
@@ -1271,7 +1336,7 @@ def _parse_scha_geometry(pdf) -> list[dict]:
 
 def _parse_scha_tables(tables: list, flat: str) -> dict:
 
-    items, nav, current = [], None, None
+    items, nav, current, cash = [], None, None, None
     for tb in tables:
         head = " ".join(" ".join(r) for r in tb[:3])
         kind = _table_kind(head)
@@ -1283,6 +1348,10 @@ def _parse_scha_tables(tables: list, flat: str) -> dict:
                 nums = [n for n in (_num_cell(c) for c in cells) if n and n > 1000]
                 if nums:
                     nav = nums[-1]
+            if cash is None and re.search(r"денежные средства\s*[–-]\s*всего", joined):
+                nums = [n for n in (_num_cell(c) for c in cells) if n is not None and n >= 0]
+                if nums:
+                    cash = nums[-1]
             isin_idx = next((i for i, c in enumerate(cells) if _ISIN_RE.match(c.replace(" ", ""))), None)
             if isin_idx is None:
                 continue
@@ -1307,6 +1376,11 @@ def _parse_scha_tables(tables: list, flat: str) -> dict:
                 nav = parse_number(n.group(1))
                 break
 
+    if cash is None:
+        m = re.search(r"Денежные средства\s*[–-]\s*всего\s*(?:\b\d{2}\s+)?(\d{1,3}(?: \d{3})*(?:,\d{1,2})?)", flat)
+        if m:
+            cash = parse_number(m.group(1))
+
     date = None
     m = re.search(r"по\s+состоянию\s+на\s+(\d{1,2})\s+([а-я]+)\s+(\d{4})", flat, re.I)
     if m and m.group(2).lower() in RU_MONTHS:
@@ -1320,7 +1394,7 @@ def _parse_scha_tables(tables: list, flat: str) -> dict:
                   flat, re.I)
     if m:
         title = m.group(1).strip()
-    return dict(nav=nav, date=date, title=title, items=items, text_len=len(flat))
+    return dict(nav=nav, date=date, title=title, items=items, cash=cash, text_len=len(flat))
 
 
 def pretty_issuer(name: str) -> str:
@@ -1372,11 +1446,11 @@ def rows_from_report(fund: str, meta: dict, rep: dict, doc_url: str) -> list[dic
     for r in rows:
         r[C_WEIGHT] = round(r["_rub"] / nav_rub * 100, 4)
         r[C_VALUE] = round(r.pop("_rub") / 1e6, 2)
-    rest = round(100 - sum(r[C_WEIGHT] for r in rows), 4)
-    if rest > 0.01:
-        rows.append({**common, C_TICKER: NO_TICKER, C_COMPANY: "Облигации, денежные средства и прочие активы",
-                     C_SECTOR: S_CASH, C_ASSET: ASSET_OTHER, C_WEIGHT: rest,
-                     C_VALUE: round(nav_rub / 1e6 * rest / 100, 2)})
+    cash = rep.get("cash")
+    if cash and nav_rub and 0 < cash < nav_rub:
+        w = round(cash / nav_rub * 100, 4)
+        rows.append({**common, C_TICKER: NO_TICKER, C_COMPANY: CASH_NAME, C_SECTOR: S_CASH,
+                     C_ASSET: ASSET_CASH, C_WEIGHT: w, C_VALUE: round(cash / 1e6, 2)})
     return rows
 
 
@@ -1393,11 +1467,13 @@ def parse_uk_structure_html(html: str) -> dict:
         tag.decompose()
     lines = [l.strip() for l in soup.get_text("\n").split("\n") if l.strip()]
     starts = [i for i, l in enumerate(lines) if any(h in l.lower() for h in _STRUCT_HEADINGS)]
-    best = dict(items=[], date=None)
+    best = dict(items=[], date=None, cash=None)
     for st_i in starts:
-        items, prev = [], None
+        items, prev, cash = [], None, None
         date = None
-        for line in lines[st_i: st_i + 400]:
+        for k, line in enumerate(lines[st_i: st_i + 400]):
+            if k and re.search(r"(?i)^(динамика|доходность|документы|стоимость пая|история|графики?)\b", line):
+                break
             if date is None:
                 m = _DATE_RE.search(line)
                 if m:
@@ -1413,12 +1489,17 @@ def parse_uk_structure_html(html: str) -> dict:
                     prev = line
                 continue
             prev = None
-            if w is None or not 0 < w <= 100 or name.strip().lower() in _ASSET_CLASS_WORDS:
+            if w is None or not 0 < w <= 100:
                 continue
+            if _CASH_RE.search(name):
+                cash = w if cash is None else cash
+                continue
+            clean = re.sub(r"(?i)\s+(ао|ап|обыкн\.?|прив\.?)$", "", name.strip())
+            if name.strip().lower() in _ASSET_CLASS_WORDS or _JUNK_RE.search(name) or not resolve_ticker(clean):
+                continue  # не эмитент (класс активов, показатель) или не удалось распознать
             items.append((name.strip(), w))
-        recognised = sum(1 for n, _ in items if resolve_ticker(n))
-        if len(items) >= 3 and recognised >= max(2, len(items) // 2) and len(items) > len(best["items"]):
-            best = dict(items=items, date=date)
+        if len(items) >= 3 and len(items) > len(best["items"]):
+            best = dict(items=items, date=date, cash=cash)
     return best
 
 
@@ -1438,13 +1519,16 @@ def rows_from_uk_page(fund: str, meta: dict, st_: dict, nav_mln, nav_date, page_
             agg[key] = {**common, C_TICKER: tk or NO_TICKER, C_COMPANY: company, C_SECTOR: sector,
                         C_ASSET: ASSET_EQUITY, C_WEIGHT: w}
     rows = list(agg.values())
+    if st_.get("cash"):
+        rows.append({**common, C_TICKER: NO_TICKER, C_COMPANY: CASH_NAME, C_SECTOR: S_CASH,
+                     C_ASSET: ASSET_CASH, C_WEIGHT: st_["cash"]})
     total = sum(r[C_WEIGHT] for r in rows)
     if total > 100.5:
         for r in rows:
             r[C_WEIGHT] *= 100.0 / total
     rest = round(100 - sum(r[C_WEIGHT] for r in rows), 2)
     if rest > 0.05:
-        rows.append({**common, C_TICKER: NO_TICKER, C_COMPANY: REST_NAME, C_SECTOR: S_CASH,
+        rows.append({**common, C_TICKER: NO_TICKER, C_COMPANY: OTHER_NAME, C_SECTOR: S_OTHER_ASSETS,
                      C_ASSET: ASSET_OTHER, C_WEIGHT: rest})
     for r in rows:
         r[C_WEIGHT] = round(r[C_WEIGHT], 4)
@@ -1678,6 +1762,7 @@ def replace_funds(base: pd.DataFrame, new: pd.DataFrame) -> pd.DataFrame:
     """Заменяет в базе строки фондов, присутствующих в new, и добавляет новые фонды."""
     if new is None or new.empty:
         return base
+    new = normalize_positions(new)
     kept = base[~base[C_FUND].isin(new[C_FUND].unique())]
     return pd.concat([kept, new], ignore_index=True)[ALL_COLS]
 
@@ -1796,28 +1881,150 @@ def fund_universe(db: pd.DataFrame, catalog: pd.DataFrame) -> pd.DataFrame:
     return pd.concat([loaded[cols], cat[cols]], ignore_index=True)
 
 
-def run_load(targets: list[tuple[str, dict]], force: bool) -> tuple[pd.DataFrame, dict]:
-    """Загружает составы фондов по одному с индикатором прогресса."""
-    if force:
+def _thread_ctx_initializer():
+    """Передаёт контекст Streamlit в рабочие потоки (чтобы кэш работал без предупреждений)."""
+    try:
+        from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
+        ctx = get_script_run_ctx()
+    except Exception:  # noqa: BLE001
+        return None
+    if ctx is None:
+        return None
+
+    def init():
+        try:
+            add_script_run_ctx(threading.current_thread(), ctx)
+        except Exception:  # noqa: BLE001
+            pass
+    return init
+
+
+class _NoComposition(Exception):
+    """Состав не получен — исключение, чтобы неудача не попала в кэш."""
+    def __init__(self, log):
+        super().__init__("состав не получен")
+        self.log = log
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def composition_cached(fund: str, inv_url: str | None, uk: str | None, ftype: str | None,
+                       nav, nav_date) -> tuple[list[dict], str, list[str]]:
+    """Состав фонда с кэшем на сутки (общим для всех посетителей). Неудачи не кэшируются."""
+    meta = {C_URL: inv_url, C_UK: uk, C_TYPE: ftype, C_NAV: nav, C_NAV_DATE: nav_date}
+    rows, src, log = load_fund_composition(fund, meta)
+    if not rows:
+        raise _NoComposition(log)
+    return rows, src, log
+
+
+def _resolve_inv_url(fund: str, meta: dict) -> str | None:
+    for u in (meta.get(C_URL), FUNDS_URLS.get(fund)):
+        if is_fund_page(u):
+            return u
+    return _catalog_url_for(fund)
+
+
+def run_load(targets: list[tuple[str, dict]], force: bool, deep: bool = False) -> tuple[pd.DataFrame, dict]:
+    """
+    Загружает составы фондов параллельно (LOAD_WORKERS потоков) с индикатором прогресса.
+    force — пересчитать составы; deep — заново скачать страницы и файлы (сбросить весь кэш).
+    """
+    if force or deep:
+        composition_cached.clear()
+    if deep:
         fetch_text.clear()
         fetch_bytes.clear()
-    parts, log = [], {}
-    n = len(targets)
-    bar = st.progress(0.0, text="Подготовка к загрузке…")
-    for i, (fund, meta) in enumerate(targets, start=1):
-        bar.progress((i - 1) / n, text=f"Фонд {i} из {n}: {fund[:45]}")
+    jobs = []
+    for fund, meta in targets:
+        nav = meta.get(C_NAV)
+        jobs.append((fund, _resolve_inv_url(fund, meta), meta.get(C_UK), meta.get(C_TYPE),
+                     None if nav is None or pd.isna(nav) else float(nav), meta.get(C_NAV_DATE)))
+    n = len(jobs)
+    results: dict[str, tuple] = {}
+    bar = st.progress(0.0, text=f"Загрузка составов: 0 из {n}")
+
+    def work(job):
         try:
-            rows, src, notes = load_fund_composition(fund, meta)
+            return job[0], composition_cached(*job)
+        except _NoComposition as exc:
+            return job[0], ([], "", exc.log)
         except Exception as exc:  # noqa: BLE001
-            rows, src, notes = [], "", [f"непредвиденная ошибка: {exc}"]
+            return job[0], ([], "", [f"непредвиденная ошибка: {exc}"])
+
+    with ThreadPoolExecutor(max_workers=LOAD_WORKERS, initializer=_thread_ctx_initializer()) as ex:
+        futures = [ex.submit(work, j) for j in jobs]
+        for done, fut in enumerate(as_completed(futures), start=1):
+            fund, res = fut.result()
+            results[fund] = res
+            bar.progress(done / n, text=f"Загрузка составов: {done} из {n} · {fund[:40]}")
+    bar.empty()
+
+    parts, log = [], {}
+    for fund, *_ in jobs:  # исходный порядок
+        rows, src, notes = results.get(fund, ([], "", ["нет результата"]))
         if rows:
             parts.append(pd.DataFrame(rows, columns=ALL_COLS))
-        log[fund] = (src, notes)
-    bar.progress(1.0, text="Загрузка завершена")
-    time.sleep(0.4)
-    bar.empty()
+        log[fund] = (src, list(notes))
     new = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=ALL_COLS)
     return new, log
+
+
+def load_catalog_parallel(pages: int) -> tuple[pd.DataFrame, list[str]]:
+    """Параллельно загружает первые `pages` страниц каталога Investfunds.ru."""
+    bar = st.progress(0.0, text=f"Каталог Investfunds.ru: 0 из {pages} страниц")
+    by_page: dict[int, list] = {}
+    errors: list[str] = []
+
+    def work(p):
+        try:
+            return p, fetch_catalog_page(p), None
+        except Exception as exc:  # noqa: BLE001
+            return p, [], f"страница {p}: {exc}"
+
+    with ThreadPoolExecutor(max_workers=LOAD_WORKERS, initializer=_thread_ctx_initializer()) as ex:
+        futures = [ex.submit(work, p) for p in range(1, pages + 1)]
+        for done, fut in enumerate(as_completed(futures), start=1):
+            p, rows, err = fut.result()
+            by_page[p] = rows
+            if err:
+                errors.append(err)
+            bar.progress(done / pages, text=f"Каталог Investfunds.ru: {done} из {pages} страниц")
+    bar.empty()
+    rows = [r for p in sorted(by_page) for r in by_page[p]]
+    if not rows and not errors:
+        errors.append("не удалось распознать таблицу каталога (возможно, изменилась вёрстка сайта)")
+    df = pd.DataFrame([r for r in rows if is_equity_fund(r)])
+    if df.empty:
+        return pd.DataFrame(columns=CATALOG_COLS), sorted(errors)
+    return df[CATALOG_COLS].drop_duplicates(C_URL).reset_index(drop=True), sorted(errors)
+
+
+def merge_catalog(cat: pd.DataFrame) -> None:
+    if cat.empty:
+        return
+    cat = cat[~cat[C_URL].isin(set(FUNDS_URLS.values()))]
+    old = st.session_state.get("catalog")
+    st.session_state.catalog = (pd.concat([old, cat]).drop_duplicates(C_URL, keep="last")
+                                if old is not None and not old.empty else cat)
+
+
+def autoload() -> None:
+    """При первом открытии: каталог (AUTO_CATALOG_PAGES страниц) и составы всех найденных фондов."""
+    st.session_state.autoloaded = True
+    box = st.empty()
+    with box.container():
+        st.info("Загружаем список фондов с Investfunds.ru и их составы с сайтов управляющих компаний. "
+                "При первом открытии за сутки это может занять несколько минут, дальше — секунды.")
+        cat, cat_errors = load_catalog_parallel(AUTO_CATALOG_PAGES)
+        merge_catalog(cat)
+        meta_all = fund_universe(st.session_state.db, st.session_state.catalog)
+        pool = meta_all.sort_values(C_NAV, ascending=False, na_position="last").head(AUTO_MAX_FUNDS)
+        targets = [(r[C_FUND], r.to_dict()) for _, r in pool.iterrows()]
+        new, log = run_load(targets, force=False)
+    box.empty()
+    if cat_errors:
+        log = {"Каталог Investfunds.ru": ("" if cat.empty else f"найдено фондов: {len(cat)}", cat_errors), **log}
+    apply_loaded(new, log)
 
 
 def _store_log(log: dict) -> None:
@@ -1846,22 +2053,14 @@ def sidebar(meta_all: pd.DataFrame) -> tuple[list[str], list[str]]:
     n_all, n_loaded = len(meta_all), int(meta_all["loaded"].sum())
     sb.caption(f"Фондов в списке: {n_all}, состав загружен: {n_loaded}.")
     with sb.expander("Загрузить список фондов с Investfunds.ru"):
-        st.caption("Каталог сканируется постранично (по 50 фондов). Берутся сформированные открытые, "
-                   "биржевые и интервальные фонды категорий «акции» и «смешанные инвестиции». "
-                   "Результат кэшируется на сутки.")
-        max_pages = st.number_input("Сколько страниц каталога просмотреть", 1, 150, 100, step=10)
+        st.caption(f"При открытии дашборда автоматически загружаются первые {AUTO_CATALOG_PAGES} страниц "
+                   "каталога (по 50 фондов). Здесь можно просмотреть больше. Берутся сформированные открытые, "
+                   "биржевые и интервальные фонды категорий «акции» и «смешанные инвестиции».")
+        max_pages = st.number_input("Сколько страниц каталога просмотреть", 1, 150,
+                                    max(AUTO_CATALOG_PAGES, 20), step=10)
         if st.button("Загрузить список фондов", type="primary", **WIDE):
-            bar = st.progress(0.0, text="Загрузка каталога…")
-            cat, errors = discover_all_equity_funds(
-                int(max_pages), progress=lambda p, n: bar.progress(min(p / n, 1.0),
-                                                                    text=f"Страница каталога {p}"))
-            bar.empty()
-            if not cat.empty:
-                known = set(FUNDS_URLS.values())
-                cat = cat[~cat[C_URL].isin(known)]
-                old = st.session_state.get("catalog")
-                st.session_state.catalog = (pd.concat([old, cat]).drop_duplicates(C_URL, keep="last")
-                                            if old is not None and not old.empty else cat)
+            cat, errors = load_catalog_parallel(int(max_pages))
+            merge_catalog(cat)
             st.session_state.catalog_msg = (
                 ("success", f"Найдено фондов акций и смешанных инвестиций: {len(cat)}.")
                 if not cat.empty else
@@ -1878,11 +2077,11 @@ def sidebar(meta_all: pd.DataFrame) -> tuple[list[str], list[str]]:
                "фонда на сайте УК → ТОП-10 с Investfunds.ru. Если всё недоступно, данные фонда не меняются.")
     max_n = sb.number_input("Сколько фондов загрузить за раз", 1, 300, 25, step=5,
                             help="Берутся фонды из текущих фильтров, начиная с самых крупных по СЧА.")
-    only_new = sb.checkbox("Только фонды без актуального состава", value=True,
+    only_new = sb.checkbox("Только фонды без актуального состава", value=False,
                            help="Пропустить фонды, состав которых уже загружен с сайтов УК.")
     force = sb.checkbox("Не использовать кэш (загрузить заново)", value=False,
                         help="Загруженные страницы и файлы кэшируются на 24 часа.")
-    if sb.button("Загрузить составы", type="primary", **WIDE):
+    if sb.button("Обновить составы", type="primary", **WIDE):
         pool = meta_all[meta_all[C_UK].isin(sel_uk) & meta_all[C_TYPE].isin(sel_types)]
         if only_new:
             pool = pool[~pool[C_SOURCE].isin([SRC_UK_REPORT, SRC_UK_PAGE, SRC_USER_REPORT])]
@@ -1890,7 +2089,7 @@ def sidebar(meta_all: pd.DataFrame) -> tuple[list[str], list[str]]:
         targets = [(r[C_FUND], r.to_dict()) for _, r in pool.iterrows()]
         if targets:
             with sb:
-                new, log = run_load(targets, force)
+                new, log = run_load(targets, force=True, deep=force)
             apply_loaded(new, log)
         else:
             st.session_state.catalog_msg = ("success", "Все фонды в выборке уже загружены с сайтов УК.")
@@ -1963,7 +2162,7 @@ def sidebar(meta_all: pd.DataFrame) -> tuple[list[str], list[str]]:
                 if user_df.empty:
                     raise ValueError("в файле нет строк с заполненными «Фонд» и «Доля»")
                 if mode.startswith("Полностью"):
-                    st.session_state.db = user_df
+                    st.session_state.db = normalize_positions(user_df)
                 else:
                     st.session_state.db = replace_funds(st.session_state.db, user_df)
                 st.session_state.upload_msg = ("success",
@@ -2154,10 +2353,12 @@ def tab_funds(fdb: pd.DataFrame, meta: pd.DataFrame) -> None:
             labels.append(f"Остальные акции ({len(rest_eq)})")
             values.append(rest_eq[C_WEIGHT].sum())
             money.append(rest_eq[C_VALUE].sum())
-        if other[C_WEIGHT].sum() > 0.01:
-            labels.append(CASH_NAME)
-            values.append(other[C_WEIGHT].sum())
-            money.append(other[C_VALUE].sum())
+        for label, part in ((CASH_NAME, other[other[C_ASSET] == ASSET_CASH]),
+                            (OTHER_NAME, other[other[C_ASSET] != ASSET_CASH])):
+            if part[C_WEIGHT].sum() > 0.01:
+                labels.append(label)
+                values.append(part[C_WEIGHT].sum())
+                money.append(part[C_VALUE].sum())
         fig = go.Figure(go.Pie(
             labels=labels, values=values, customdata=money, hole=0.55, sort=False,
             direction="clockwise", marker=dict(colors=PALETTE, line=dict(color="white", width=1)),
@@ -2176,7 +2377,8 @@ def tab_funds(fdb: pd.DataFrame, meta: pd.DataFrame) -> None:
         )
         st.plotly_chart(fig, config=PLOTLY_CONFIG, **CHART_W)
     with g2:
-        sec = (fd.assign(**{C_SECTOR: fd[C_SECTOR].where(fd[C_ASSET] == ASSET_EQUITY, CASH_NAME)})
+        non_eq_label = fd[C_ASSET].where(fd[C_ASSET] == ASSET_CASH, OTHER_NAME)
+        sec = (fd.assign(**{C_SECTOR: fd[C_SECTOR].where(fd[C_ASSET] == ASSET_EQUITY, non_eq_label)})
                  .groupby(C_SECTOR, as_index=False)[[C_WEIGHT, C_VALUE]].sum().sort_values(C_WEIGHT))
         fig_s = px.bar(sec, x=C_WEIGHT, y=C_SECTOR, orientation="h", text=C_WEIGHT,
                        custom_data=[C_VALUE], color_discrete_sequence=["#2E5BFF"])
@@ -2341,6 +2543,13 @@ def main() -> None:
         st.session_state.db = build_default_db().copy()
     if "catalog" not in st.session_state:
         st.session_state.catalog = pd.DataFrame(columns=CATALOG_COLS)
+    if st.session_state.get("data_version") != 2:  # привести старые данные сессии к новому формату
+        st.session_state.db = normalize_positions(st.session_state.db)
+        st.session_state.data_version = 2
+    if not st.session_state.get("autoloaded"):
+        st.markdown('<p class="app-title">📈 Позиции российских ПИФов в акциях</p>', unsafe_allow_html=True)
+        autoload()
+        st.rerun()
 
     meta_all = fund_universe(st.session_state.db, st.session_state.catalog)
     sel_uk, sel_types = sidebar(meta_all)
