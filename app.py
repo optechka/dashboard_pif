@@ -2530,19 +2530,27 @@ def tab_funds(fdb: pd.DataFrame, meta: pd.DataFrame) -> None:
                  + "</p>", unsafe_allow_html=True)
     q = t2c.text_input("Поиск по позициям", placeholder="🔎 Поиск: тикер, компания или сектор…", key="q_fund",
                        label_visibility="collapsed")
-    cols = [C_TICKER, C_COMPANY, C_SECTOR, C_WEIGHT, C_VALUE] + ([C_HOLDERS] if is_total else [])
-    table = search_filter(fd[cols], q, [C_TICKER, C_COMPANY, C_SECTOR])
-    if is_total:
-        table = table.rename(columns={C_WEIGHT: "Доля в сводном портфеле, %",
-                                      C_VALUE: "Суммарная стоимость позиции, млн руб."})
-        pct_c, mln_c = "Доля в сводном портфеле, %", "Суммарная стоимость позиции, млн руб."
-    else:
-        pct_c, mln_c = C_WEIGHT, C_VALUE
-    st.caption(f"Показано позиций: {len(table)} из {len(fd)}. "
-               "Сортировка — щелчком по заголовку колонки.")
+    # акции по убыванию доли, затем «Денежные средства» и «Прочие активы»
+    order = fd[C_ASSET].map({ASSET_EQUITY: 0, ASSET_CASH: 1}).fillna(2)
+    view = fd.assign(_o=order).sort_values(["_o", C_WEIGHT], ascending=[True, False])
+    view = search_filter(view, q, [C_TICKER, C_COMPANY, C_SECTOR])  # поиск и по тикеру, и по сектору
+    cols = [C_COMPANY, C_VALUE, C_WEIGHT] + ([C_HOLDERS] if is_total else [])
+    table = view[cols]
+    st.caption(f"Показано позиций: {len(table)} из {len(fd)}. Сортировка — щелчком по заголовку колонки.")
     st.dataframe(
-        styled(table, pct_cols=[pct_c], mln_cols=[mln_c]),
+        styled(table, pct_cols=[C_WEIGHT], mln_cols=[C_VALUE]),
         **WIDE, hide_index=True, height=min(38 + 35 * max(len(table), 1), 640),
+        column_config={
+            C_COMPANY: st.column_config.Column("Компания", width="medium"),
+            C_VALUE: st.column_config.Column(
+                "Стоимость, млн ₽", width="small",
+                help="Суммарная стоимость позиции во всех фондах, млн руб." if is_total
+                else "Оценочная стоимость позиции, млн руб. (СЧА × доля / 100)"),
+            C_WEIGHT: st.column_config.Column(
+                "Доля, %", width="small",
+                help="Доля в сводном портфеле, %" if is_total else "Доля в фонде, %"),
+            C_HOLDERS: st.column_config.Column("Фондов", width="small", help="Число фондов-держателей"),
+        },
     )
 
 
@@ -2579,15 +2587,26 @@ def _stocks_total_view(agg: pd.DataFrame, fdb: pd.DataFrame) -> None:
         "ticker": "Тикер", "company": "Компания", "sector": "Сектор", "funds": C_HOLDERS,
         "total": "Суммарная стоимость пакетов, млн руб.",
         "share": "Доля от всех акций в фондах, %", "avg_w": "Средняя доля в портфелях, %",
-    })[["Тикер", "Компания", "Сектор", C_HOLDERS, "Суммарная стоимость пакетов, млн руб.",
-        "Доля от всех акций в фондах, %", "Средняя доля в портфелях, %"]]
+    })
     q = st.text_input("Поиск по акциям", placeholder="Тикер, компания или сектор…", key="q_all_stocks")
-    table = search_filter(table, q, ["Тикер", "Компания", "Сектор"])
+    table = search_filter(table, q, ["Тикер", "Компания", "Сектор"])[
+        ["Компания", "Суммарная стоимость пакетов, млн руб.", "Доля от всех акций в фондах, %",
+         C_HOLDERS, "Средняя доля в портфелях, %"]]
     st.caption(f"Показано бумаг: {len(table)} из {len(agg)}. Сортировка — щелчком по заголовку колонки.")
     st.dataframe(
         styled(table, pct_cols=["Доля от всех акций в фондах, %", "Средняя доля в портфелях, %"],
                mln_cols=["Суммарная стоимость пакетов, млн руб."]),
         **WIDE, hide_index=True, height=min(38 + 35 * max(len(table), 1), 640),
+        column_config={
+            "Компания": st.column_config.Column("Компания", width="medium"),
+            "Суммарная стоимость пакетов, млн руб.": st.column_config.Column(
+                "Стоимость, млн ₽", width="small", help="Суммарная стоимость пакетов во всех фондах, млн руб."),
+            "Доля от всех акций в фондах, %": st.column_config.Column(
+                "Доля, %", width="small", help="Доля от стоимости всех акций в выбранных фондах"),
+            C_HOLDERS: st.column_config.Column("Фондов", width="small", help="Число фондов-держателей"),
+            "Средняя доля в портфелях, %": st.column_config.Column(
+                "Ср. доля, %", width="small", help="Средняя доля бумаги в портфелях фондов-держателей"),
+        },
     )
 
 
@@ -2655,16 +2674,23 @@ def tab_stocks(fdb: pd.DataFrame) -> None:
     table = holders.rename(columns={
         C_FUND: "Название фонда", C_WEIGHT: "Доля в портфеле, %",
         C_VALUE: "Оценочная стоимость пакета, млн руб.", C_URL: "Ссылка на фонд",
-    })[["Название фонда", C_UK, C_TYPE, "Доля в портфеле, %",
-        "Оценочная стоимость пакета, млн руб.", "Ссылка на фонд"]]
+    })[["Название фонда", "Оценочная стоимость пакета, млн руб.", "Доля в портфеле, %",
+        C_UK, C_TYPE, "Ссылка на фонд"]]
     q = st.text_input("Поиск по фондам", placeholder="Название фонда или УК…", key="q_stock")
     table = search_filter(table, q, ["Название фонда", C_UK, C_TYPE])
     st.dataframe(
         styled(table, pct_cols=["Доля в портфеле, %"], mln_cols=["Оценочная стоимость пакета, млн руб."]),
         **WIDE, hide_index=True,
         height=min(38 + 35 * max(len(table), 1), 640),
-        column_config={"Ссылка на фонд": st.column_config.LinkColumn(
-            "Ссылка на фонд", display_text="Открыть на Investfunds.ru")},
+        column_config={
+            "Название фонда": st.column_config.Column("Фонд", width="medium"),
+            "Оценочная стоимость пакета, млн руб.": st.column_config.Column(
+                "Стоимость, млн ₽", width="small", help="Оценочная стоимость пакета, млн руб."),
+            "Доля в портфеле, %": st.column_config.Column("Доля, %", width="small", help="Доля в портфеле фонда, %"),
+            C_UK: st.column_config.Column("УК", help="Управляющая компания"),
+            C_TYPE: st.column_config.Column("Тип", width="small", help="Тип фонда"),
+            "Ссылка на фонд": st.column_config.LinkColumn("Ссылка", display_text="Открыть"),
+        },
     )
 
 
