@@ -73,6 +73,7 @@ ASSET_OTHER = "Прочие активы"
 BASE_URL = "https://investfunds.ru"
 
 # Автозагрузка при открытии дашборда
+MIN_NAV_MLN = 1000        # в список попадают фонды акций и смешанные фонды с СЧА от этой величины (млн руб.)
 AUTO_CATALOG_PAGES = 20   # сколько страниц каталога Investfunds.ru (по 50 фондов) просматривать
 AUTO_MAX_FUNDS = 300      # предел числа фондов, составы которых загружаются автоматически
 LOAD_WORKERS = 4          # параллельных загрузок (больше — быстрее, но выше риск блокировки сайтом)
@@ -730,6 +731,30 @@ def _parse_top_assets_from_text(lines: list[str]) -> list[tuple[str, float]]:
     return _dedupe_items([(n, w) for n, w in items if w is not None and 0 < w <= 100])
 
 
+def _parse_other_funds(soup: BeautifulSoup) -> list[dict]:
+    """Таблица «Другие фонды этой УК»: [{name, url, nav_rub}] (все фонды УК с их СЧА)."""
+    fund_href = re.compile(r"^(?:https?://(?:www\.)?investfunds\.ru)?/funds/(\d+)/?$")
+    anchor = soup.find(string=re.compile(r"Другие\s+фонды\s+этой\s+УК", re.I))
+    tables = [anchor.find_next("table")] if anchor and anchor.find_next("table") else []
+    tables += [t for t in soup.find_all("table")
+               if "сча" in t.get_text(" ", strip=True)[:200].lower()
+               and "название фонда" in t.get_text(" ", strip=True)[:200].lower()]
+    out, seen = [], set()
+    for t in tables:
+        for tr in t.find_all("tr"):
+            a = tr.find("a", href=True)
+            tds = tr.find_all("td")
+            if not a or not fund_href.match(a["href"]) or len(tds) < 2:
+                continue
+            fid = fund_href.match(a["href"]).group(1)
+            if fid in seen:
+                continue
+            seen.add(fid)
+            out.append(dict(name=a.get_text(" ", strip=True), url=f"{BASE_URL}/funds/{fid}/",
+                            nav_rub=parse_number(tds[-1].get_text(" ", strip=True))))
+    return out
+
+
 def parse_fund_html(html: str) -> dict:
     """Извлекает со страницы фонда: тип, УК, СЧА, даты и ТОП-активы."""
     soup = BeautifulSoup(html, "html.parser")
@@ -739,7 +764,15 @@ def parse_fund_html(html: str) -> dict:
     lines = [l.strip() for l in text.split("\n") if l.strip()]
 
     info = dict(type=None, uk=None, title=None, nav_mln=None, nav_date=None,
-                struct_date=None, items=[], uk_link=None)
+                struct_date=None, items=[], uk_link=None, kind=None, status=None, object=None,
+                qualified="квалифицированных инвесторов" in text.lower(), other_funds=[])
+    low = [l.lower() for l in lines]
+    for label, key in (("тип", "kind"), ("статус", "status"), ("объект инвестирования", "object")):
+        if label in low:
+            i = low.index(label)
+            if i + 1 < len(lines):
+                info[key] = lines[i + 1].strip()
+    info["other_funds"] = _parse_other_funds(soup)
     for a in soup.find_all("a", href=True):
         if "сайте ук" in a.get_text(" ", strip=True).lower() and a["href"].startswith("http"):
             info["uk_link"] = a["href"]
@@ -2131,6 +2164,126 @@ def load_catalog_parallel(pages: int) -> tuple[pd.DataFrame, list[str]]:
     return df[CATALOG_COLS].drop_duplicates(C_URL).reset_index(drop=True), sorted(errors)
 
 
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_uk_list() -> list[tuple[str, str]]:
+    """Все управляющие компании с Investfunds.ru: [(название, адрес страницы)]."""
+    soup = BeautifulSoup(_fetch_html(f"{BASE_URL}/uk/"), "html.parser")
+    out, seen = [], set()
+    for a in soup.find_all("a", href=True):
+        m = re.match(r"^(?:https?://(?:www\.)?investfunds\.ru)?/uk/([^/?#]+)/?$", a["href"])
+        name = a.get_text(" ", strip=True)
+        if m and name and m.group(1) not in seen:
+            seen.add(m.group(1))
+            out.append((name, f"{BASE_URL}/uk/{m.group(1)}/"))
+    return out
+
+
+def parse_uk_page(html: str) -> list[dict]:
+    """Фонды на странице УК: [{name, url, kind}], kind — открытый / биржевой / интервальный / закрытый."""
+    from bs4 import NavigableString, Tag
+    soup = BeautifulSoup(html, "html.parser")
+    kinds = {"открытый", "биржевой", "интервальный", "закрытый"}
+    fund_href = re.compile(r"^(?:https?://(?:www\.)?investfunds\.ru)?/funds/(\d+)/?$")
+    current, out, seen = None, [], set()
+    for el in soup.descendants:
+        if isinstance(el, NavigableString):
+            t = el.strip().lower()
+            if t in kinds:
+                current = t
+        elif isinstance(el, Tag) and el.name == "a" and el.get("href") and fund_href.match(el["href"]):
+            fid = fund_href.match(el["href"]).group(1)
+            if fid not in seen:
+                seen.add(fid)
+                out.append(dict(name=el.get_text(" ", strip=True), url=f"{BASE_URL}/funds/{fid}/", kind=current))
+    return out
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_uk_funds(uk_url: str) -> list[dict]:
+    return parse_uk_page(_fetch_html(uk_url))
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fund_page_info(url: str) -> dict:
+    """Разобранная страница фонда (без ТОП-активов в кэше не нуждается — но кэшируем целиком)."""
+    return parse_fund_html(fetch_text(url))
+
+
+def _is_equity_info(info: dict) -> bool:
+    obj = (info.get("object") or "").lower()
+    kind = (info.get("kind") or "").lower()
+    status = (info.get("status") or "").lower()
+    return (("акци" in obj or "смешан" in obj) and "закрыт" not in kind and info.get("type") != "ЗПИФ"
+            and (not status or "сформирован" in status) and not info.get("qualified"))
+
+
+def _parallel(func, items, label: str, bar) -> list:
+    """Выполняет func(item) в LOAD_WORKERS потоках, обновляя индикатор прогресса."""
+    results, n = [], len(items)
+    if not n:
+        return results
+    with ThreadPoolExecutor(max_workers=LOAD_WORKERS, initializer=_thread_ctx_initializer()) as ex:
+        futures = {ex.submit(func, it): it for it in items}
+        for done, fut in enumerate(as_completed(futures), start=1):
+            try:
+                results.append((futures[fut], fut.result(), None))
+            except Exception as exc:  # noqa: BLE001
+                results.append((futures[fut], None, str(exc)))
+            bar.progress(done / n, text=f"{label}: {done} из {n}")
+    return results
+
+
+def discover_equity_funds(min_nav_mln: float = MIN_NAV_MLN) -> tuple[pd.DataFrame, list[str]]:
+    """
+    Список фондов акций и смешанных фондов с СЧА ≥ min_nav_mln:
+      1) все УК с Investfunds.ru → фонды на страницах УК;
+      2) у каждой УК — таблица «Другие фонды этой УК» (СЧА всех её фондов) на странице одного фонда;
+      3) фонды с СЧА от порога проверяются по своей странице (объект инвестирования, тип, статус).
+    """
+    errors: list[str] = []
+    bar = st.progress(0.0, text="Список управляющих компаний…")
+    try:
+        uks = fetch_uk_list()
+    except Exception as exc:  # noqa: BLE001
+        uks = []
+        errors.append(f"список УК: {exc}")
+
+    # 1) фонды на страницах УК → по одному «опорному» фонду на УК
+    seeds = set(u for u in FUNDS_URLS.values() if is_fund_page(u))
+    for _, funds, err in _parallel(fetch_uk_funds, [u for _, u in uks], "Страницы управляющих компаний", bar):
+        if err or not funds:
+            continue
+        open_funds = [f for f in funds if f["kind"] != "закрытый"]
+        if open_funds:
+            seeds.add(open_funds[0]["url"])
+    if not uks:
+        errors.append("список УК недоступен — поиск ведётся только по фондам из реестра")
+
+    # 2) СЧА всех фондов каждой УК из таблицы «Другие фонды этой УК»
+    navs: dict[str, tuple[str, float]] = {}
+    for url, info, err in _parallel(fund_page_info, sorted(seeds), "СЧА фондов управляющих компаний", bar):
+        if err or not info:
+            continue
+        for f in info["other_funds"]:
+            if f["nav_rub"]:
+                navs.setdefault(f["url"], (f["name"], f["nav_rub"]))
+        if info.get("nav_mln"):
+            navs.setdefault(url, (info.get("title") or url, info["nav_mln"] * 1e6))
+    candidates = [u for u, (_, nav) in navs.items() if nav >= min_nav_mln * 1e6]
+
+    # 3) проверка каждого кандидата по его странице
+    rows = []
+    for url, info, err in _parallel(fund_page_info, candidates, "Проверка фондов (СЧА от 1 млрд руб.)", bar):
+        if err or not info or not _is_equity_info(info):
+            continue
+        rows.append({C_FUND: info.get("title") or navs[url][0], C_UK: normalize_uk(info.get("uk")),
+                     C_TYPE: info.get("type") or "ОПИФ", C_NAV: info.get("nav_mln") or navs[url][1] / 1e6,
+                     C_NAV_DATE: info.get("nav_date"), C_URL: url, C_OBJECT: info.get("object")})
+    bar.empty()
+    df = pd.DataFrame(rows, columns=CATALOG_COLS)
+    return df.drop_duplicates(C_URL).sort_values(C_NAV, ascending=False).reset_index(drop=True), errors
+
+
 def merge_catalog(cat: pd.DataFrame) -> None:
     if cat.empty:
         return
@@ -2141,13 +2294,13 @@ def merge_catalog(cat: pd.DataFrame) -> None:
 
 
 def autoload() -> None:
-    """При первом открытии: каталог (AUTO_CATALOG_PAGES страниц) и составы всех найденных фондов."""
+    """При первом открытии: все фонды акций и смешанные фонды с СЧА от MIN_NAV_MLN и их составы."""
     st.session_state.autoloaded = True
     box = st.empty()
     with box.container():
         st.info("Загружаем список фондов с Investfunds.ru и их составы с сайтов управляющих компаний. "
                 "При первом открытии за сутки это может занять несколько минут, дальше — секунды.")
-        cat, cat_errors = load_catalog_parallel(AUTO_CATALOG_PAGES)
+        cat, cat_errors = discover_equity_funds()
         merge_catalog(cat)
         meta_all = fund_universe(st.session_state.db, st.session_state.catalog)
         pool = meta_all.sort_values(C_NAV, ascending=False, na_position="last").head(AUTO_MAX_FUNDS)
@@ -2155,7 +2308,7 @@ def autoload() -> None:
         new, log = run_load(targets, force=False)
     box.empty()
     if cat_errors:
-        log = {"Каталог Investfunds.ru": ("" if cat.empty else f"найдено фондов: {len(cat)}", cat_errors), **log}
+        log = {"Список фондов Investfunds.ru": ("" if cat.empty else f"найдено фондов: {len(cat)}", cat_errors), **log}
     apply_loaded(new, log)
 
 
@@ -2184,14 +2337,16 @@ def sidebar(meta_all: pd.DataFrame) -> tuple[list[str], list[str]]:
     sb.header("📋 Список фондов")
     n_all, n_loaded = len(meta_all), int(meta_all["loaded"].sum())
     sb.caption(f"Фондов в списке: {n_all}, состав загружен: {n_loaded}.")
-    with sb.expander("Загрузить список фондов с Investfunds.ru"):
-        st.caption(f"При открытии дашборда автоматически загружаются первые {AUTO_CATALOG_PAGES} страниц "
-                   "каталога (по 50 фондов). Здесь можно просмотреть больше. Берутся сформированные открытые, "
-                   "биржевые и интервальные фонды категорий «акции» и «смешанные инвестиции».")
-        max_pages = st.number_input("Сколько страниц каталога просмотреть", 1, 150,
-                                    max(AUTO_CATALOG_PAGES, 20), step=10)
-        if st.button("Загрузить список фондов", type="primary", **WIDE):
-            cat, errors = load_catalog_parallel(int(max_pages))
+    with sb.expander("Обновить список фондов с Investfunds.ru"):
+        st.caption(f"При открытии дашборда автоматически находятся все фонды акций и смешанные фонды "
+                   f"с СЧА от {MIN_NAV_MLN:,.0f} млн руб.".replace(",", " ") +
+                   " по всем управляющим компаниям на Investfunds.ru (открытые, биржевые и интервальные, "
+                   "сформированные, не для квалифицированных инвесторов). Здесь можно изменить порог.")
+        min_nav = st.number_input("Минимальная СЧА фонда, млн руб.", 0, 100000, int(MIN_NAV_MLN), step=500)
+        if st.button("Обновить список фондов", type="primary", **WIDE):
+            for f in (fetch_uk_list, fetch_uk_funds, fund_page_info):
+                f.clear()
+            cat, errors = discover_equity_funds(float(min_nav))
             merge_catalog(cat)
             st.session_state.catalog_msg = (
                 ("success", f"Найдено фондов акций и смешанных инвестиций: {len(cat)}.")
