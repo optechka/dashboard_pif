@@ -502,12 +502,19 @@ def classify_asset(raw_name: str) -> tuple[str, str, str, str]:
     clean = re.sub(r"\[[^\]]*\]", "", raw).strip(" ,")
     m = _ASSET_KIND.match(clean)
     issuer, kind = (m.group("issuer"), m.group("kind").lower()) if m else (clean, "")
+    low = clean.lower()
 
-    if "облигац" in kind:
+    # «ВЭБ.РФ, ПБО-002Р-58 - Облигации», «АЛРОСА, 002P-02 - Облигации», «Россия, 26249 (ОФЗ-ПД, ...)»:
+    # слово «Облигации» может стоять не сразу после запятой
+    if "облигац" in kind or "облигац" in low or re.search(r"\bофз\b|\bбо-|\bпбо-|\d{3}p-\d", low):
+        issuer = re.split(r",|\s-\s", issuer)[0]
         return NO_TICKER, f"{issuer.strip()} (облигации)", S_BONDS, ASSET_BONDS
     if kind.startswith("пай") or "инвестиционн" in kind:
         return NO_TICKER, f"{issuer.strip()} (паи фонда)", S_OTHER, ASSET_OTHER
 
+    has_equity_mark = bool(re.search(r"акци|расписк|депозитарн", low))
+    if not has_equity_mark:  # тип бумаги не указан — не считаем акцией
+        return NO_TICKER, issuer.strip(), S_OTHER, ASSET_OTHER
     ticker = resolve_ticker(issuer)
     if ticker:
         if "прив" in kind:
@@ -2040,7 +2047,8 @@ def fund_universe(db: pd.DataFrame, catalog: pd.DataFrame) -> pd.DataFrame:
     loaded["loaded"] = True
     if catalog is None or catalog.empty:
         return loaded
-    cat = catalog[~catalog[C_FUND].isin(loaded[C_FUND]) & ~catalog[C_URL].isin(loaded[C_URL])].copy()
+    cat = catalog[~catalog[C_FUND].isin(loaded[C_FUND]) & ~catalog[C_URL].isin(loaded[C_URL])
+                  & ~catalog[C_FUND].map(is_excluded_name)].copy()
     cat[C_SOURCE] = "—"
     cat["loaded"] = False
     cols = [C_FUND, C_UK, C_TYPE, C_NAV, C_NAV_DATE, C_URL, C_SOURCE, "loaded"]
@@ -2216,6 +2224,16 @@ _NON_EQUITY_NAME_RE = re.compile(
     r"сберегательн|депозит|овернайт|\bофз\b|\bзолот|драгоцен|недвижим|валютн|юан|доллар|евро", re.I)
 
 
+# Такие фонды не попадают в выборку никогда (если в названии нет слова «акции»)
+_EXCLUDE_NAME_RE = re.compile(
+    r"накопительн|денежн\w*\s+рын|ликвидност|овернайт|флоатер|сберегательн|сбережен|облигац|\bофз\b", re.I)
+
+
+def is_excluded_name(name: str) -> bool:
+    n = str(name or "")
+    return bool(_EXCLUDE_NAME_RE.search(n)) and "акци" not in n.lower()
+
+
 def _equity_share_of_items(items: list[tuple[str, float]]) -> float:
     """Доля акций среди перечисленных ТОП-активов (в % от суммы их весов)."""
     total = sum(w for _, w in items)
@@ -2230,6 +2248,8 @@ def _is_equity_info(info: dict) -> bool:
     kind = (info.get("kind") or "").lower()
     status = (info.get("status") or "").lower()
     title = info.get("title") or ""
+    if is_excluded_name(title):
+        return False
     if not (("акци" in obj or "смешан" in obj) and "закрыт" not in kind and info.get("type") != "ЗПИФ"
             and (not status or "сформирован" in status) and not info.get("qualified")):
         return False
@@ -2351,7 +2371,8 @@ def apply_loaded(new: pd.DataFrame, log: dict) -> None:
         # без акций — исключаем всегда; по полному составу (справка о СЧА) — если акций меньше порога.
         # По ТОП-10 долю портфеля не оценить: остаток может состоять из тех же акций.
         drop = [f for f in new[C_FUND].unique() if f not in own and
-                (eq_share.get(f, 0.0) <= 0 or (f in full and eq_share.get(f, 0.0) < MIN_EQUITY_SHARE))]
+                (is_excluded_name(f) or eq_share.get(f, 0.0) <= 0
+                 or (f in full and eq_share.get(f, 0.0) < MIN_EQUITY_SHARE))]
         if drop:
             new = new[~new[C_FUND].isin(drop)]
             cat = st.session_state.get("catalog")
@@ -2901,9 +2922,13 @@ def main() -> None:
         st.session_state.db = build_default_db().copy()
     if "catalog" not in st.session_state:
         st.session_state.catalog = pd.DataFrame(columns=CATALOG_COLS)
-    if st.session_state.get("data_version") != 2:  # привести старые данные сессии к новому формату
-        st.session_state.db = normalize_positions(st.session_state.db)
-        st.session_state.data_version = 2
+    if st.session_state.get("data_version") != 3:  # привести старые данные сессии к новому формату
+        db0 = normalize_positions(st.session_state.db)
+        bad = [f for f in db0[C_FUND].unique() if f not in FUNDS_URLS and is_excluded_name(f)]
+        st.session_state.db = db0[~db0[C_FUND].isin(bad)].reset_index(drop=True)
+        cat0 = st.session_state.catalog
+        st.session_state.catalog = cat0[~cat0[C_FUND].map(is_excluded_name)] if not cat0.empty else cat0
+        st.session_state.data_version = 3
     if not st.session_state.get("autoloaded"):
         st.markdown('<p class="app-title">📈 Позиции российских ПИФов в акциях</p>', unsafe_allow_html=True)
         autoload()
