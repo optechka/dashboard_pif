@@ -3,11 +3,17 @@
 Позиции ПИФов РФ в акциях — дашборд на Streamlit.
 
 Режимы:
-  • «Анализ по фондам» — состав портфеля выбранного фонда;
+  • «Анализ по фондам» — состав портфеля выбранного фонда или сводный портфель (ИТОГО);
   • «Анализ по акциям (Кто держит бумагу?)» — какие фонды держат выбранную акцию.
 
-Источник данных: страницы фондов на Investfunds.ru (блок «Структура фонда», ТОП-активы
-и СЧА). Если сайт недоступен (403/таймаут), работает встроенная база.
+Источники данных:
+  • список фондов — каталог Investfunds.ru (фонды акций и смешанных инвестиций);
+  • состав фонда, по убыванию полноты:
+      1) «Справка о стоимости чистых активов» (форма ОКУД 0420502) с сайта УК — полный список акций;
+      2) блок структуры портфеля на странице фонда на сайте УК;
+      3) ТОП-10 со страницы фонда на Investfunds.ru;
+      4) встроенная ориентировочная база (работает без интернета).
+  • справку о СЧА можно также загрузить вручную (PDF или ссылка), а базу — из CSV/Excel.
 
 Запуск локально:  streamlit run app.py
 """
@@ -45,10 +51,11 @@ C_ASSET = "Тип актива"
 C_WEIGHT = "Доля в фонде, %"
 C_VALUE = "Оценочная стоимость позиции, млн руб."
 C_SOURCE = "Источник данных"
+C_DOC = "Ссылка на источник"
 
 ALL_COLS = [
     C_FUND, C_UK, C_TYPE, C_NAV, C_DATE, C_NAV_DATE, C_URL,
-    C_TICKER, C_COMPANY, C_SECTOR, C_ASSET, C_WEIGHT, C_VALUE, C_SOURCE,
+    C_TICKER, C_COMPANY, C_SECTOR, C_ASSET, C_WEIGHT, C_VALUE, C_SOURCE, C_DOC,
 ]
 
 SRC_BUILTIN = "Встроенная база"
@@ -164,7 +171,7 @@ COMPANIES: dict[str, tuple[str, str]] = {
     "MSRS": ("Россети Московский регион", S_ENE),
     "MRKP": ("Россети Центр и Приволжье", S_ENE),
     "ELFV": ("ЭЛ5-Энерго", S_ENE), "OGKB": ("ОГК-2", S_ENE),
-    "TGKA": ("ТГК-1", S_ENE),
+    "TGKA": ("ТГК-1", S_ENE), "MSNG": ("Мосэнерго", S_ENE),
     "AFLT": ("Аэрофлот", S_TRN), "FLOT": ("Совкомфлот", S_TRN),
     "NMTP": ("НМТП", S_TRN), "EUTR": ("ЕвроТранс", S_TRN),
     "FESH": ("ДВМП", S_TRN), "WUSH": ("ВУШ Холдинг", S_TRN),
@@ -224,7 +231,7 @@ ALIASES: dict[str, str] = {
     "интер рао": "IRAO", "интер рао еэс": "IRAO", "россети": "FEES",
     "федеральная сетевая компания": "FEES", "русгидро": "HYDR", "юнипро": "UPRO",
     "россети московский регион": "MSRS", "россети центр и приволжье": "MRKP",
-    "эл5-энерго": "ELFV", "энел россия": "ELFV", "огк-2": "OGKB", "тгк-1": "TGKA",
+    "мосэнерго": "MSNG", "эл5-энерго": "ELFV", "энел россия": "ELFV", "огк-2": "OGKB", "тгк-1": "TGKA",
     "пик": "PIKK", "пик-специализированный застройщик": "PIKK",
     "самолет": "SMLT", "группа компаний самолет": "SMLT", "лср": "LSRG",
     "группа лср": "LSRG", "эталон": "ETLN",
@@ -639,7 +646,11 @@ def parse_fund_html(html: str) -> dict:
     lines = [l.strip() for l in text.split("\n") if l.strip()]
 
     info = dict(type=None, uk=None, title=None, nav_mln=None, nav_date=None,
-                struct_date=None, items=[])
+                struct_date=None, items=[], uk_link=None)
+    for a in soup.find_all("a", href=True):
+        if "сайте ук" in a.get_text(" ", strip=True).lower() and a["href"].startswith("http"):
+            info["uk_link"] = a["href"]
+            break
 
     m = _TITLE_RE.search(text)
     if m:
@@ -738,40 +749,759 @@ def parse_investfunds(urls_dict: dict[str, str]) -> tuple[pd.DataFrame, dict[str
     return pd.DataFrame(rows, columns=ALL_COLS), errors
 
 
-@st.cache_data(ttl=86400, show_spinner=False)
-def discover_all_equity_funds(max_pages: int = 3) -> tuple[dict[str, str], list[str]]:
+# =============================================================================
+# 5а. КАТАЛОГ ФОНДОВ INVESTFUNDS.RU
+# =============================================================================
+
+C_OBJECT = "Объект инвестирования"
+CATALOG_COLS = [C_FUND, C_UK, C_TYPE, C_NAV, C_NAV_DATE, C_URL, C_OBJECT]
+
+# Названия УК на Investfunds.ru → единое написание в приложении
+UK_NORMALIZE = {
+    "уk райффайзен": "Райффайзен Капитал", "ук райффайзен": "Райффайзен Капитал",
+    "райффайзен капитал": "Райффайзен Капитал", "райффайзен": "Райффайзен Капитал",
+    "промсвязь": "ПСБ Управление активами", "псб": "ПСБ Управление активами",
+    "атон-менеджмент": "АТОН", "атон": "АТОН",
+    "втб капитал управление активами": "ВИМ Инвестиции",
+}
+FUND_KIND_TO_TYPE = {"открытый": "ОПИФ", "биржевой": "БПИФ", "интервальный": "ИПИФ", "закрытый": "ЗПИФ"}
+
+
+def normalize_uk(name: str | None) -> str:
+    if not name:
+        return "Не указана"
+    key = re.sub(r"\s+", " ", str(name)).strip().lower()
+    return UK_NORMALIZE.get(key, re.sub(r"\s+", " ", str(name)).strip())
+
+
+def _header_index(headers: list[str], *keys: str) -> int | None:
+    for i, h in enumerate(headers):
+        hl = h.lower()
+        if all(k in hl for k in keys):
+            return i
+    return None
+
+
+def parse_catalog_page(html: str) -> list[dict]:
     """
-    Парсит каталог https://investfunds.ru/funds/ и находит фонды категории «акции»
-    или «смешанные инвестиции». Возвращает ({название: URL}, [ошибки]).
+    Разбирает одну страницу каталога https://investfunds.ru/funds/?limit=50&page=N.
+    Названия фондов и колонки с данными на сайте могут быть в разных таблицах
+    (закреплённая первая колонка) — строки сопоставляются по порядку.
     """
-    found: dict[str, str] = {}
-    errors: list[str] = []
-    for page in range(1, max_pages + 1):
-        url = CATALOG_URL if page == 1 else f"{CATALOG_URL}?page={page}"
-        try:
-            html = _fetch_html(url)
-        except Exception as exc:  # noqa: BLE001
-            errors.append(f"Страница каталога {page}: {exc}")
+    soup = BeautifulSoup(html, "html.parser")
+    fund_href = re.compile(r"^(?:https?://(?:www\.)?investfunds\.ru)?/funds/(\d+)/?$")
+
+    data_tbl = None
+    for t in soup.find_all("table"):
+        head_txt = " ".join(th.get_text(" ", strip=True) for th in t.find_all("th"))
+        if "объект инвестирования" in head_txt.lower():
+            data_tbl = t
             break
-        soup = BeautifulSoup(html, "html.parser")
-        before = len(found)
-        for a in soup.find_all("a", href=True):
-            m = re.match(r"^(?:https?://(?:www\.)?investfunds\.ru)?/funds/(\d+)/?$", a["href"])
-            if not m:
+    if data_tbl is None:
+        return []
+
+    head_row = next((tr for tr in data_tbl.find_all("tr") if tr.find_all("th")), None)
+    headers = [th.get_text(" ", strip=True) for th in head_row.find_all("th")] if head_row else []
+    data_rows = [tr for tr in data_tbl.find_all("tr") if tr.find_all("td")]
+
+    # Список фондов по порядку (если ссылок нет внутри строк данных)
+    name_links = []
+    seen = set()
+    for a in soup.find_all("a", href=True):
+        m = fund_href.match(a["href"])
+        if not m or data_tbl in a.parents:
+            continue
+        name = a.get_text(" ", strip=True)
+        if len(name) < 2 or m.group(1) in seen:
+            continue
+        seen.add(m.group(1))
+        cell = a.find_parent(["td", "th", "li", "div"])
+        cell_txt = cell.get_text(" ", strip=True).lower() if cell else ""
+        name_links.append((name, m.group(1), cell_txt))
+
+    idx = {
+        "uk": _header_index(headers, "управляющая"),
+        "date": _header_index(headers, "дата расчета"),
+        "nav": _header_index(headers, "сча"),
+        "status": _header_index(headers, "статус"),
+        "object": _header_index(headers, "объект инвестирования"),
+    }
+    out = []
+    for i, tr in enumerate(data_rows):
+        tds = tr.find_all("td")
+        texts = [td.get_text(" ", strip=True) for td in tds]
+        shift = len(texts) - len(headers) if headers else 0
+
+        def cell(key):
+            j = idx.get(key)
+            if j is None:
+                return ""
+            j += shift
+            return texts[j] if 0 <= j < len(texts) else ""
+
+        link = next((a for a in tr.find_all("a", href=True) if fund_href.match(a["href"])), None)
+        if link is not None:
+            fid = fund_href.match(link["href"]).group(1)
+            name = link.get_text(" ", strip=True)
+            kind_txt = link.find_parent("td").get_text(" ", strip=True).lower() if link.find_parent("td") else ""
+        elif i < len(name_links):
+            name, fid, kind_txt = name_links[i]
+        else:
+            continue
+        uk = cell("uk")
+        if not uk:
+            uk_img = tr.find("img", alt=True)
+            uk = uk_img["alt"] if uk_img else ""
+        kind = next((v for k, v in FUND_KIND_TO_TYPE.items() if k in kind_txt), "")
+        out.append({
+            C_FUND: name, C_UK: normalize_uk(uk), C_TYPE: kind or "ОПИФ",
+            C_NAV: parse_number(cell("nav")), C_NAV_DATE: cell("date") or None,
+            C_URL: f"{BASE_URL}/funds/{fid}/", C_OBJECT: cell("object"),
+            "_status": cell("status").lower(), "_kind": kind,
+        })
+    return out
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_catalog_page(page: int) -> list[dict]:
+    url = f"{CATALOG_URL}?limit=50&page={page}"
+    return parse_catalog_page(_fetch_html(url))
+
+
+def is_equity_fund(row: dict) -> bool:
+    obj = (row.get(C_OBJECT) or "").lower()
+    status = row.get("_status") or ""
+    if row.get("_kind") == "ЗПИФ":
+        return False
+    if status and "сформирован" not in status:
+        return False
+    if obj:
+        return "акци" in obj or "смешан" in obj
+    return "акци" in row[C_FUND].lower()
+
+
+def discover_all_equity_funds(max_pages: int = 100, progress=None) -> tuple[pd.DataFrame, list[str]]:
+    """
+    Загружает каталог https://investfunds.ru/funds/ постранично и оставляет
+    сформированные открытые, биржевые и интервальные фонды категорий
+    «акции» и «смешанные инвестиции». Каждая страница кэшируется на сутки.
+    """
+    rows, errors = [], []
+    for page in range(1, max_pages + 1):
+        if progress:
+            progress(page, max_pages)
+        try:
+            part = fetch_catalog_page(page)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"страница {page}: {exc}")
+            break
+        if not part:
+            if page == 1:
+                errors.append("не удалось распознать таблицу каталога (возможно, изменилась вёрстка сайта)")
+            break
+        new = [r for r in part if r[C_URL] not in {x[C_URL] for x in rows}]
+        if not new:
+            break
+        rows += new
+        time.sleep(0.3)
+    df = pd.DataFrame([r for r in rows if is_equity_fund(r)])
+    if df.empty:
+        return pd.DataFrame(columns=CATALOG_COLS), errors
+    return df[CATALOG_COLS].drop_duplicates(C_URL).reset_index(drop=True), errors
+
+
+# =============================================================================
+# 5б. ПОЛНЫЙ СОСТАВ С САЙТОВ УПРАВЛЯЮЩИХ КОМПАНИЙ
+# =============================================================================
+# Источник №1 — «Справка о стоимости чистых активов» (форма ОКУД 0420502). Каждая УК
+# ежемесячно публикует её на своём сайте; в разделе «2.7. Акции российских акционерных
+# обществ» перечислены ВСЕ акции фонда (ISIN, категория, количество, стоимость).
+# Источник №2 — блок «Структура активов» / «Портфель фонда» на странице фонда на сайте УК.
+
+SRC_UK_REPORT = "Сайт УК: справка о СЧА"
+SRC_UK_PAGE = "Сайт УК: страница фонда"
+
+# Известные страницы фондов на сайтах УК (для остальных ссылка берётся с Investfunds.ru —
+# блок «Страница ПИФ на сайте УК»)
+UK_PAGES: dict[str, str] = {
+    "ВИМ — Индекс МосБиржи (ОПИФ)": "https://www.wealthim.ru/products/pif/opif/wimfimb/",
+    "ВИМ — Акции": "https://www.wealthim.ru/products/pif/opif/wimfa/",
+    "Альфа-Капитал — Ликвидные акции": "https://www.alfacapital.ru/individual/pifs/opifa_akliq",
+    "Альфа-Капитал — Акции компаний роста": "https://www.alfacapital.ru/individual/pifs/opif_ak_growth",
+    "Альфа-Капитал — Акции с выплатой дохода": "https://www.alfacapital.ru/individual/pifs/opif_akstockip",
+}
+# Т-Капитал выкладывает справки на CDN с предсказуемыми именами файлов
+TCAP_CDN = "https://cdn.t-capital-funds.ru/static/documents"
+TCAP_REPORTS: dict[str, tuple[str, str]] = {
+    "Т-Капитал — Индекс МосБиржи (TMOS)": ("tmos", "4100"),
+    "Т-Капитал — Акции роста (TITR)": ("titr", "6126"),
+}
+
+# ISIN → тикер для крупнейших бумаг (остальные — по названию эмитента или через ISS МосБиржи)
+ISIN_MAP: dict[str, str] = {
+    "RU0009029540": "SBER", "RU0009029557": "SBERP", "RU0009024277": "LKOH",
+    "RU0007661625": "GAZP", "RU000A0DKVS5": "NVTK", "RU0009062285": "AFLT", "RU0008958863": "MSNG",
+    "RU0009046452": "NLMK", "RU0008943394": "RTKM", "RU0007288411": "GMKN",
+    "RU000A0J2Q06": "ROSN", "RU0009033591": "TATN", "RU0006944147": "TATNP",
+    "RU0008926258": "SNGS", "RU0009029524": "SNGSP", "RU0009046510": "CHMF",
+    "RU000A0JKQU8": "MGNT", "RU000A0JNAA8": "PLZL", "RU0007252813": "ALRS",
+    "RU0007775219": "MTSS", "RU000A0JP5V6": "VTBR", "RU000A0JR4A1": "MOEX",
+    "RU000A0JPNM1": "IRAO", "RU000A0JRKT8": "PHOR", "RU0009084396": "MAGN",
+    "RU000A0JPKH7": "HYDR", "RU000A0JP7J7": "PIKK", "RU000A0DQZE3": "AFKS",
+    "RU0009091573": "TRNFP", "RU000A0JUG31": "CBOM", "RU000A0JNUD0": "UPRO",
+    "RU000A100K72": "ENPG", "RU000A1025V3": "RUAL", "RU000A107T19": "YDEX",
+    "RU000A107UL4": "T", "RU000A108X38": "X5", "RU000A103X66": "POSI",
+    "RU000A0ZZG02": "SMLT", "RU000A106T36": "ASTR",
+}
+
+RU_MONTHS = {"января": 1, "февраля": 2, "марта": 3, "апреля": 4, "мая": 5, "июня": 6,
+             "июля": 7, "августа": 8, "сентября": 9, "октября": 10, "ноября": 11, "декабря": 12}
+_ISIN_RE = re.compile(r"^[A-Z]{2}[0-9A-Z]{9}[0-9]$")
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_text(url: str) -> str:
+    return _fetch_html(url)
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_bytes(url: str) -> bytes:
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=40)
+    except requests.RequestException as exc:
+        raise RuntimeError(f"не удалось скачать файл ({exc.__class__.__name__})")
+    if resp.status_code >= 400:
+        raise RuntimeError(f"файл недоступен (ошибка {resp.status_code})")
+    return resp.content
+
+
+def _url_exists(url: str) -> bool:
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=15, stream=True)
+        ok = r.status_code == 200 and "html" not in r.headers.get("Content-Type", "").lower()
+        r.close()
+        return ok
+    except requests.RequestException:
+        return False
+
+
+_ISS_STATE = {"down": False}
+
+
+@st.cache_data(ttl=7 * 86400, show_spinner=False)
+def isin_to_ticker_moex(isin: str) -> tuple[str, str] | None:
+    """Поиск тикера по ISIN через открытый API Московской биржи (ISS)."""
+    if _ISS_STATE["down"]:
+        return None
+    url = ("https://iss.moex.com/iss/securities.json?iss.meta=off&q=" + isin +
+           "&securities.columns=secid,isin,shortname,primary_boardid")
+    try:
+        data = requests.get(url, headers=HEADERS, timeout=6).json()["securities"]["data"]
+    except Exception:  # noqa: BLE001
+        _ISS_STATE["down"] = True  # API недоступен — больше не ждём его в этой сессии
+        return None
+    exact = [r for r in data if r[1] == isin]
+    best = next((r for r in exact if r[3] in ("TQBR", "TQTF", "TQPI")), exact[0] if exact else None)
+    return (best[0], best[2]) if best else None
+
+
+def _extract_date(text: str) -> datetime | None:
+    s = str(text)
+    for pat, fmt in ((r"(\d{2}\.\d{2}\.\d{4})", "%d.%m.%Y"), (r"(\d{2}-\d{2}-\d{4})", "%d-%m-%Y"),
+                     (r"(\d{4}-\d{2}-\d{2})", "%Y-%m-%d"), (r"(?<!\d)(\d{8})(?!\d)", "%d%m%Y"),
+                     (r"(?<!\d)(\d{4}_\d{2}_\d{2})(?!\d)", "%Y_%m_%d")):
+        for m in re.finditer(pat, s):
+            try:
+                d = datetime.strptime(m.group(1), fmt)
+                if 2015 <= d.year <= 2100:
+                    return d
+            except ValueError:
                 continue
-            name = a.get_text(" ", strip=True)
-            if len(name) < 3:
+    m = re.search(r"(\d{1,2})\s+(" + "|".join(RU_MONTHS) + r")\s+(\d{4})", s.lower())
+    if m:
+        return datetime(int(m.group(3)), RU_MONTHS[m.group(2)], int(m.group(1)))
+    return None
+
+
+_REPORT_TEXT_RE = re.compile(r"справк\w*\s+о\s+стоимости\s+чистых\s+активов|\bсча\b", re.I)
+_REPORT_HREF_RE = re.compile(r"scha|spravka|0420502", re.I)
+_REPORT_EXCLUDE = re.compile(r"правил|прирост|изменени|расч[её]т\w*\s+сча|kid|ключев", re.I)
+
+
+def find_report_links(html: str, base_url: str) -> list[tuple[datetime | None, str]]:
+    """Ссылки на справки о СЧА на странице, от свежих к старым."""
+    from urllib.parse import urljoin
+    soup = BeautifulSoup(html, "html.parser")
+    found: dict[str, datetime | None] = {}
+    for a in soup.find_all("a", href=True):
+        text = f"{a.get_text(' ', strip=True)} {a.get('title', '')}".strip()
+        href = urljoin(base_url, a["href"])
+        if not (_REPORT_TEXT_RE.search(text) or _REPORT_HREF_RE.search(href)):
+            continue
+        if _REPORT_EXCLUDE.search(text) or href.lower().endswith((".jpg", ".png")):
+            continue
+        found.setdefault(href, _extract_date(f"{text} {href}"))
+    return sorted(((d, u) for u, d in found.items()),
+                  key=lambda x: x[0] or datetime(1900, 1, 1), reverse=True)
+
+
+def discover_reports(page_url: str) -> list[str]:
+    """Ищет справки о СЧА на странице фонда УК и, при необходимости, в разделах раскрытия информации."""
+    from urllib.parse import urljoin, urlparse
+    html = fetch_text(page_url)
+    links = find_report_links(html, page_url)
+    if links:
+        return [u for _, u in links]
+    soup = BeautifulSoup(html, "html.parser")
+    host = urlparse(page_url).netloc
+    hops = []
+    for a in soup.find_all("a", href=True):
+        t = a.get_text(" ", strip=True).lower()
+        if any(k in t for k in ("раскрытие", "отчетност", "отчётност", "документы фонда", "документы")):
+            u = urljoin(page_url, a["href"])
+            if urlparse(u).netloc == host and u not in hops:
+                hops.append(u)
+    for u in hops[:4]:
+        try:
+            links = find_report_links(fetch_text(u), u)
+        except Exception:  # noqa: BLE001
+            continue
+        if links:
+            return [x for _, x in links]
+    return []
+
+
+def _last_business_day(year: int, month: int) -> datetime:
+    nxt = datetime(year + (month == 12), month % 12 + 1, 1)
+    d = nxt - pd.Timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= pd.Timedelta(days=1)
+    return d
+
+
+def tcap_report_url(slug: str, regno: str) -> str | None:
+    """Подбирает адрес последней справки о СЧА фонда Т-Капитала на их CDN."""
+    today = datetime.now()
+    for k in range(0, 4):
+        y, m = today.year, today.month - k
+        while m <= 0:
+            m += 12
+            y -= 1
+        d = _last_business_day(y, m)
+        if d > today:
+            continue
+        ds = d.strftime("%d-%m-%Y")
+        for name in (f"otchet-scha-{slug}-{ds}.pdf", f"otchet-scha-{slug}-{ds}.PDF",
+                     f"{regno}-{slug}-scha-{ds}.pdf", f"{slug}-scha-{ds}.pdf"):
+            url = f"{TCAP_CDN}/{name}"
+            if _url_exists(url):
+                return url
+    return None
+
+
+def _num_cell(c) -> float | None:
+    s = re.sub(r"\s+", "", str(c or ""))
+    if not re.fullmatch(r"-?\d+(?:[.,]\d+)?", s):
+        return None
+    return float(s.replace(",", "."))
+
+
+def _table_kind(header_txt: str) -> str | None:
+    h = header_txt.lower()
+    if "категория акций" in h or "акции российских" in h or "акции иностранных" in h:
+        return "equity"
+    if "депозитарн" in h:
+        return "equity"
+    if "облигац" in h:
+        return "bond"
+    if "инвестиционн" in h and "па" in h:
+        return "units"
+    return None
+
+
+def parse_scha_pdf(data: bytes) -> dict:
+    """
+    Разбирает «Справку о стоимости чистых активов» (форма 0420502) в PDF.
+    Возвращает: nav (руб.), date (дд.мм.гггг), title (название фонда),
+    items — список акций {issuer, isin, kind ('ord'/'pref'/''), value (руб.)}.
+    """
+    import pdfplumber  # импорт здесь, чтобы приложение запускалось и без этой библиотеки
+
+    with pdfplumber.open(io.BytesIO(data)) as pdf:
+        text = "\n".join(page.extract_text() or "" for page in pdf.pages)
+        flat = re.sub(r"\s+", " ", text)
+        result = None
+        # 1) таблицы с линиями сетки; 2) «визуализация XBRL» без линий — по выравниванию текста
+        for settings in (None, {"vertical_strategy": "text", "horizontal_strategy": "text"}):
+            tables = []
+            for page in pdf.pages:
+                for tb in (page.extract_tables(settings) if settings else page.extract_tables()) or []:
+                    tables.append([[re.sub(r"\s+", " ", str(c or "")).strip() for c in row] for row in tb])
+            result = _parse_scha_tables(tables, flat)
+            if len(result["items"]) >= 3:
+                break
+        if len(result["items"]) < 3:  # 3) разбор по координатам слов (таблицы без сетки)
+            geo = _parse_scha_geometry(pdf)
+            if len(geo) > len(result["items"]):
+                result["items"] = geo
+    return result
+
+
+def _line_segments(words: list[dict]) -> list[dict]:
+    """Склеивает слова одной строки в «ячейки» по расстоянию между ними."""
+    segs = []
+    for w in sorted(words, key=lambda w: w["x0"]):
+        gap_limit = max(2.0, 0.45 * (w["bottom"] - w["top"]))
+        if segs and w["x0"] - segs[-1]["x1"] <= gap_limit:
+            segs[-1]["text"] += " " + w["text"]
+            segs[-1]["x1"] = w["x1"]
+        else:
+            segs.append(dict(text=w["text"], x0=w["x0"], x1=w["x1"]))
+    return segs
+
+
+def _parse_scha_geometry(pdf) -> list[dict]:
+    """
+    Разбор раздела «Акции российских акционерных обществ» по положению слов на странице
+    (для справок без линий сетки). Строка таблицы — блок строк текста от одного ISIN
+    до следующего; колонки внутри блока определяются по горизонтальной координате.
+    """
+    isin_start = re.compile(r"[A-Z]{2}[0-9A-Z]{4,10}")
+    items, in_equity = [], False
+    for page in pdf.pages:
+        words = page.extract_words(keep_blank_chars=False, use_text_flow=False)
+        lines: list[list[dict]] = []
+        for w in sorted(words, key=lambda w: (round(w["top"]), w["x0"])):
+            if lines and abs(lines[-1][0]["top"] - w["top"]) <= 2:
+                lines[-1].append(w)
+            else:
+                lines.append([w])
+        segs = [_line_segments(l) for l in lines]
+
+        # отмечаем строки-«якоря» (начало ISIN) и границы разделов
+        anchors, section = [], []
+        for i, ls in enumerate(segs):
+            txt = " ".join(sg["text"] for sg in ls).lower()
+            if "акции российских" in txt or "категория акций" in txt or "депозитарн" in txt:
+                in_equity = True
+            elif re.search(r"\bоблигаци|инвестиционные паи|раздел 4|раздел iv|обязательств", txt) \
+                    and "акци" not in txt:
+                in_equity = False
+            section.append(in_equity)
+            isg = next((sg for sg in ls if isin_start.fullmatch(sg["text"].replace(" ", ""))), None)
+            if isg is not None:
+                anchors.append((i, isg))
+        for k, (i, isg) in enumerate(anchors):
+            if not section[i]:
                 continue
-            box = a.find_parent("tr") or a.find_parent("li") or a.parent
-            ctx = (box.get_text(" ", strip=True) if box else name).lower()
-            if "ликвидир" in ctx or "квалифицированн" in ctx:
+            end = min(anchors[k + 1][0] if k + 1 < len(anchors) else len(segs), i + 6)
+            for j in range(i + 1, end):  # блок не заходит в следующий раздел
+                if re.match(r"(?i)(раздел|подраздел|\d\.\d+\.)\s", " ".join(sg["text"] for sg in segs[j])):
+                    end = j
+                    break
+            block = [sg for ls in segs[i:end] for sg in ls]
+            # ISIN (может быть перенесён)
+            isin = "".join(sg["text"].replace(" ", "") for sg in block
+                           if abs(sg["x0"] - isg["x0"]) <= 3 and re.fullmatch(r"[0-9A-Z ]+", sg["text"]))
+            isin = isin[:12]
+            if not _ISIN_RE.match(isin):
                 continue
-            if any(k in ctx for k in ("акци", "смешан")):
-                found.setdefault(name, f"{BASE_URL}/funds/{m.group(1)}/")
-        if len(found) == before:
-            break  # новых фондов на странице нет — дальше не идём
-        time.sleep(0.5)
-    return found, errors
+            # колонки правее ISIN
+            cols: list[dict] = []
+            for sg in sorted((sg for sg in block if sg["x0"] > isg["x1"] + 1), key=lambda z: z["x0"]):
+                col = next((c for c in cols if abs(c["x0"] - sg["x0"]) <= 4), None)
+                if col is None:
+                    cols.append(dict(x0=sg["x0"], parts=[sg["text"]]))
+                else:
+                    col["parts"].append(sg["text"])
+            cols.sort(key=lambda c: c["x0"])
+            num_vals, cat_txt = [], ""
+            for c in cols:
+                joined = ""
+                for part in c["parts"]:
+                    joined += part if part.startswith(",") or not joined else " " + part
+                v = _num_cell(joined)
+                if v is not None:
+                    num_vals.append(v)
+                else:
+                    cat_txt += "".join(c["parts"]).lower()
+            if not num_vals:
+                continue
+            value = num_vals[1] if len(num_vals) >= 2 else num_vals[0]
+            left = [sg for sg in block if sg["x1"] < isg["x0"] - 1 and re.search(r"[А-Яа-яA-Za-z]{2}", sg["text"])]
+            first_x = min((sg["x0"] for sg in left), default=0)
+            name = " ".join(sg["text"] for sg in left if abs(sg["x0"] - first_x) <= 4)
+            items.append(dict(issuer=name, isin=isin, value=value,
+                              kind="pref" if "привилег" in cat_txt else ("ord" if "обыкнов" in cat_txt else "")))
+    return items
+
+
+def _parse_scha_tables(tables: list, flat: str) -> dict:
+
+    items, nav, current = [], None, None
+    for tb in tables:
+        head = " ".join(" ".join(r) for r in tb[:3])
+        kind = _table_kind(head)
+        if kind:
+            current = kind
+        for cells in tb:
+            joined = " ".join(cells).lower()
+            if "стоимость чистых активов" in joined and "справка" not in joined:
+                nums = [n for n in (_num_cell(c) for c in cells) if n and n > 1000]
+                if nums:
+                    nav = nums[-1]
+            isin_idx = next((i for i, c in enumerate(cells) if _ISIN_RE.match(c.replace(" ", ""))), None)
+            if isin_idx is None:
+                continue
+            cat = next((c.lower() for c in cells if "обыкнов" in c.lower() or "привилег" in c.lower()), "")
+            if not cat and current != "equity":
+                continue
+            nums = [n for n in (_num_cell(c) for c in cells[isin_idx + 1:]) if n is not None]
+            if not nums:
+                continue
+            value = nums[1] if len(nums) >= 2 else nums[0]
+            name = next((c for c in cells[:isin_idx] if re.search(r"[А-Яа-яA-Za-z]{3}", c)), "")
+            items.append(dict(issuer=name, isin=cells[isin_idx].replace(" ", ""),
+                              kind="pref" if "привилег" in cat else ("ord" if cat else ""),
+                              value=value))
+
+    if nav is None:  # запасной вариант — поиск по тексту
+        for m in reversed(list(re.finditer(r"Стоимость чистых активов", flat))):
+            window = flat[m.end(): m.end() + 250]
+            n = (re.search(r"\b\d{2,3}\s+(\d{1,3}(?: \d{3})+,\d{1,2})", window)
+                 or re.search(r"(\d{1,3}(?: \d{3})+,\d{1,2})", window))
+            if n:
+                nav = parse_number(n.group(1))
+                break
+
+    date = None
+    m = re.search(r"по\s+состоянию\s+на\s+(\d{1,2})\s+([а-я]+)\s+(\d{4})", flat, re.I)
+    if m and m.group(2).lower() in RU_MONTHS:
+        date = f"{int(m.group(1)):02d}.{RU_MONTHS[m.group(2).lower()]:02d}.{m.group(3)}"
+    else:
+        m = re.search(r"Параметры справки.{0,400}?(\d{2}\.\d{2}\.\d{4})", flat)
+        date = m.group(1) if m else None
+
+    title = None
+    m = re.search(r"(?:фонд\w*|фондом)\s+рыночных\s+финансовых\s+инструментов\s*[«\"“]([^»\"”]{3,120})[»\"”]",
+                  flat, re.I)
+    if m:
+        title = m.group(1).strip()
+    return dict(nav=nav, date=date, title=title, items=items, text_len=len(flat))
+
+
+def pretty_issuer(name: str) -> str:
+    s = re.sub(r"(?i)публичное акционерное общество|акционерное общество|международная компания|"
+               r"\bмкпао\b|\bпао\b|\bао\b|\bоао\b|\bнк\b", " ", str(name))
+    s = re.sub(r"[«»\"“”]", " ", s)
+    return re.sub(r"\s+", " ", s).strip(" ,") or str(name)
+
+
+def _resolve_report_item(it: dict) -> tuple[str, str, str]:
+    """(тикер, компания, сектор) для строки справки."""
+    tk = ISIN_MAP.get(it["isin"]) or resolve_ticker(it["issuer"])
+    if tk and it["kind"] == "pref":
+        tk = PREF_MAP.get(tk, tk)
+    if not tk:
+        found = isin_to_ticker_moex(it["isin"])
+        if found:
+            tk = found[0]
+    if tk and tk in COMPANIES:
+        return tk, COMPANIES[tk][0], COMPANIES[tk][1]
+    suffix = " (прив.)" if it["kind"] == "pref" else ""
+    return (tk or NO_TICKER), pretty_issuer(it["issuer"]) + suffix, S_OTHER
+
+
+def _fund_common(fund: str, meta: dict, nav_mln, struct_date, nav_date, source, doc_url) -> dict:
+    fm = FUND_META.get(fund, {})
+    return {
+        C_FUND: fund, C_UK: meta.get(C_UK) or fm.get("uk") or "Не указана",
+        C_TYPE: meta.get(C_TYPE) or fm.get("type") or "ОПИФ", C_NAV: nav_mln,
+        C_DATE: struct_date or nav_date or datetime.now().strftime("%d.%m.%Y"),
+        C_NAV_DATE: nav_date or struct_date or "—",
+        C_URL: meta.get(C_URL) or FUNDS_URLS.get(fund, BASE_URL), C_SOURCE: source, C_DOC: doc_url,
+    }
+
+
+def rows_from_report(fund: str, meta: dict, rep: dict, doc_url: str) -> list[dict]:
+    nav_rub = rep["nav"]
+    common = _fund_common(fund, meta, round(nav_rub / 1e6, 2), rep["date"], rep["date"],
+                          SRC_UK_REPORT, doc_url)
+    agg: dict[tuple, dict] = {}
+    for it in rep["items"]:
+        tk, company, sector = _resolve_report_item(it)
+        key = (tk, company)
+        if key not in agg:
+            agg[key] = {**common, C_TICKER: tk, C_COMPANY: company, C_SECTOR: sector,
+                        C_ASSET: ASSET_EQUITY, "_rub": 0.0}
+        agg[key]["_rub"] += it["value"]
+    rows = list(agg.values())
+    for r in rows:
+        r[C_WEIGHT] = round(r["_rub"] / nav_rub * 100, 4)
+        r[C_VALUE] = round(r.pop("_rub") / 1e6, 2)
+    rest = round(100 - sum(r[C_WEIGHT] for r in rows), 4)
+    if rest > 0.01:
+        rows.append({**common, C_TICKER: NO_TICKER, C_COMPANY: "Облигации, денежные средства и прочие активы",
+                     C_SECTOR: S_CASH, C_ASSET: ASSET_OTHER, C_WEIGHT: rest,
+                     C_VALUE: round(nav_rub / 1e6 * rest / 100, 2)})
+    return rows
+
+
+_STRUCT_HEADINGS = ("структура активов", "портфель фонда", "состав фонда", "структура портфеля",
+                    "топ-10 эмитентов", "состав портфеля", "крупнейшие позиции")
+_ASSET_CLASS_WORDS = {"акции", "облигации", "денежные средства", "прочее", "прочие активы",
+                      "депозиты", "паи", "иное", "дебиторская задолженность", "валюта"}
+
+
+def parse_uk_structure_html(html: str) -> dict:
+    """Извлекает пары «эмитент — доля, %» из блока структуры портфеля на странице фонда УК."""
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup(["script", "style", "noscript"]):
+        tag.decompose()
+    lines = [l.strip() for l in soup.get_text("\n").split("\n") if l.strip()]
+    starts = [i for i, l in enumerate(lines) if any(h in l.lower() for h in _STRUCT_HEADINGS)]
+    best = dict(items=[], date=None)
+    for st_i in starts:
+        items, prev = [], None
+        date = None
+        for line in lines[st_i: st_i + 400]:
+            if date is None:
+                m = _DATE_RE.search(line)
+                if m:
+                    date = m.group(1)
+            m_pct = re.fullmatch(r"(\d{1,3}[.,]\d{1,4})\s*%", line)
+            m_pair = re.fullmatch(r"(.{2,80}?)[\s:–-]+(\d{1,3}[.,]\d{1,4})\s*%", line)
+            if m_pct and prev:
+                name, w = prev, parse_number(m_pct.group(1))
+            elif m_pair:
+                name, w = m_pair.group(1), parse_number(m_pair.group(2))
+            else:
+                if re.search(r"[А-Яа-яA-Za-z]{2}", line) and len(line) <= 80:
+                    prev = line
+                continue
+            prev = None
+            if w is None or not 0 < w <= 100 or name.strip().lower() in _ASSET_CLASS_WORDS:
+                continue
+            items.append((name.strip(), w))
+        recognised = sum(1 for n, _ in items if resolve_ticker(n))
+        if len(items) >= 3 and recognised >= max(2, len(items) // 2) and len(items) > len(best["items"]):
+            best = dict(items=items, date=date)
+    return best
+
+
+def rows_from_uk_page(fund: str, meta: dict, st_: dict, nav_mln, nav_date, page_url) -> list[dict]:
+    common = _fund_common(fund, meta, nav_mln, st_["date"], nav_date, SRC_UK_PAGE, page_url)
+    agg: dict[tuple, dict] = {}
+    for name, w in st_["items"]:
+        clean = re.sub(r"(?i)\s+(ао|ап|ао\.|ап\.|обыкн\.?|прив\.?)$", "", name).strip()
+        tk = resolve_ticker(clean)
+        if tk and re.search(r"(?i)\s(ап|прив\.?)$", name):
+            tk = PREF_MAP.get(tk, tk)
+        company, sector = COMPANIES.get(tk, (clean, S_OTHER)) if tk else (clean, S_OTHER)
+        key = (tk or NO_TICKER, company)
+        if key in agg:
+            agg[key][C_WEIGHT] += w
+        else:
+            agg[key] = {**common, C_TICKER: tk or NO_TICKER, C_COMPANY: company, C_SECTOR: sector,
+                        C_ASSET: ASSET_EQUITY, C_WEIGHT: w}
+    rows = list(agg.values())
+    rest = round(100 - sum(r[C_WEIGHT] for r in rows), 2)
+    if rest > 0.05:
+        rows.append({**common, C_TICKER: NO_TICKER, C_COMPANY: "Прочие активы", C_SECTOR: S_OTHER,
+                     C_ASSET: ASSET_OTHER, C_WEIGHT: rest})
+    for r in rows:
+        r[C_WEIGHT] = round(r[C_WEIGHT], 4)
+        r[C_VALUE] = round(nav_mln * r[C_WEIGHT] / 100, 2) if nav_mln else None
+    return rows
+
+
+def load_fund_composition(fund: str, meta: dict) -> tuple[list[dict], str, list[str]]:
+    """
+    Загружает состав фонда по цепочке источников:
+      1) справка о СЧА с сайта УК (полный состав);
+      2) блок структуры портфеля на странице фонда на сайте УК;
+      3) ТОП-10 с Investfunds.ru.
+    Возвращает (строки базы, описание источника, журнал попыток).
+    """
+    log: list[str] = []
+    inv_url = meta.get(C_URL) or FUNDS_URLS.get(fund)
+    info = None
+    if is_fund_page(inv_url):
+        try:
+            info = parse_fund_html(fetch_text(inv_url))
+        except Exception as exc:  # noqa: BLE001
+            log.append(f"Investfunds.ru: {exc}")
+    else:
+        log.append("Investfunds.ru: адрес страницы фонда не указан")
+    nav_mln = (info or {}).get("nav_mln") or meta.get(C_NAV) or FUND_META.get(fund, {}).get("nav")
+    nav_date = (info or {}).get("nav_date") or meta.get(C_NAV_DATE)
+    uk_url = UK_PAGES.get(fund) or (info or {}).get("uk_link")
+
+    # 1. Справка о СЧА
+    report_urls: list[str] = []
+    if fund in TCAP_REPORTS:
+        u = tcap_report_url(*TCAP_REPORTS[fund])
+        if u:
+            report_urls.append(u)
+        else:
+            log.append("Т-Капитал: справка о СЧА за последние месяцы не найдена")
+    uk_failed = False
+    if uk_url:
+        try:
+            report_urls += [u for u in discover_reports(uk_url) if u not in report_urls]
+        except Exception as exc:  # noqa: BLE001
+            uk_failed = True
+            log.append(f"Сайт УК: {exc}")
+    elif fund not in TCAP_REPORTS:
+        log.append("Сайт УК: адрес страницы фонда не найден")
+    for u in report_urls[:3]:
+        try:
+            rep = parse_scha_pdf(fetch_bytes(u))
+        except Exception as exc:  # noqa: BLE001
+            log.append(f"Справка {u.rsplit('/', 1)[-1]}: {exc}")
+            continue
+        if rep["nav"] and len(rep["items"]) >= 3:
+            return rows_from_report(fund, meta, rep, u), f"{SRC_UK_REPORT} на {rep['date'] or '—'}", log
+        log.append(f"Справка {u.rsplit('/', 1)[-1]}: не удалось разобрать таблицу акций")
+    if uk_url and not report_urls and not uk_failed:
+        log.append("Сайт УК: ссылки на справки о СЧА на странице не найдены")
+
+    # 2. Структура на странице фонда УК
+    if uk_url and not uk_failed:
+        try:
+            st_ = parse_uk_structure_html(fetch_text(uk_url))
+            if st_["items"]:
+                return (rows_from_uk_page(fund, meta, st_, nav_mln, nav_date, uk_url),
+                        f"{SRC_UK_PAGE} на {st_['date'] or '—'}", log)
+            log.append("Сайт УК: блок структуры портфеля не найден (возможно, загружается скриптом)")
+        except Exception as exc:  # noqa: BLE001
+            log.append(f"Сайт УК: {exc}")
+
+    # 3. ТОП-10 Investfunds.ru
+    if info and info["items"]:
+        rows = _rows_from_parsed(fund, inv_url, info)
+        for r in rows:
+            r[C_UK] = meta.get(C_UK) or r[C_UK]
+            r[C_TYPE] = meta.get(C_TYPE) or r[C_TYPE]
+            r[C_DOC] = inv_url
+        return rows, f"{SRC_SITE} (ТОП-10)", log
+    if info is not None:
+        log.append("Investfunds.ru: таблица ТОП-активов не найдена")
+    return [], "", log
+
+
+def match_fund_by_title(title: str | None, candidates: list[str]) -> int:
+    """Индекс фонда, лучше всего совпадающего с названием из справки."""
+    if not title or not candidates:
+        return 0
+    stop = {"фонд", "фонда", "паевой", "инвестиционный", "открытый", "биржевой", "интервальный",
+            "рыночных", "финансовых", "инструментов", "и", "с", "—", "-", "пиф", "бпиф", "опиф", "ипиф"}
+
+    def toks(s):
+        return {t for t in re.findall(r"[а-яa-z0-9]+", s.lower().replace("ё", "е")) if t not in stop}
+    t0 = toks(title)
+    scores = [len(t0 & toks(c)) / (len(t0 | toks(c)) or 1) for c in candidates]
+    return max(range(len(candidates)), key=lambda i: scores[i])
 
 
 # =============================================================================
@@ -793,7 +1523,7 @@ UPLOAD_COLUMNS = {
     "доля в портфеле, %": C_WEIGHT, "вес, %": C_WEIGHT, "вес": C_WEIGHT,
     "оценочная стоимость позиции, млн руб.": C_VALUE,
     "стоимость позиции, млн руб.": C_VALUE, "стоимость, млн руб.": C_VALUE,
-    "источник данных": C_SOURCE,
+    "источник данных": C_SOURCE, "ссылка на источник": C_DOC,
 }
 
 
@@ -966,93 +1696,192 @@ def search_filter(df: pd.DataFrame, query: str, cols: list[str]) -> pd.DataFrame
     return df[mask]
 
 
-def run_update(urls: dict[str, str], force: bool) -> tuple[pd.DataFrame, dict[str, str]]:
-    """Загружает фонды по одному с индикатором прогресса (каждый фонд кэшируется отдельно)."""
-    if force:
-        parse_investfunds.clear()
-    parts, errors = [], {}
-    n = len(urls)
-    bar = st.progress(0.0, text="Подготовка к загрузке…")
-    for i, (fund, url) in enumerate(urls.items(), start=1):
-        label = fund.replace("#auto:", "")
-        bar.progress((i - 1) / n, text=f"Загрузка {i} из {n}: {label[:40]}")
-        df_part, errs = parse_investfunds({fund: url})
-        if not df_part.empty:
-            parts.append(df_part)
-        errors.update({k.replace("#auto:", ""): v for k, v in errs.items()})
-    bar.progress(1.0, text="Загрузка завершена")
-    time.sleep(0.4)
-    bar.empty()
-    new = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=ALL_COLS)
-    return new, errors
-
-
 # =============================================================================
 # 8. ИНТЕРФЕЙС
 # =============================================================================
 
-def sidebar(db: pd.DataFrame) -> tuple[list[str], list[str]]:
+SRC_USER_REPORT = "Справка о СЧА (загружена вручную)"
+SOURCE_NOTES = {
+    SRC_UK_REPORT: "Полный состав из «Справки о стоимости чистых активов» (форма 0420502) с сайта управляющей компании.",
+    SRC_USER_REPORT: "Полный состав из загруженной вами справки о стоимости чистых активов.",
+    SRC_UK_PAGE: "Структура портфеля со страницы фонда на сайте управляющей компании.",
+    SRC_SITE: "ТОП-10 позиций с Investfunds.ru, остальное — «Прочие активы».",
+    SRC_BUILTIN: "Ориентировочный состав из встроенной базы. Загрузите актуальный состав кнопкой ниже.",
+    SRC_USER: "Данные из загруженного файла.",
+}
+
+
+def fund_universe(db: pd.DataFrame, catalog: pd.DataFrame) -> pd.DataFrame:
+    """Все фонды приложения: с загруженным составом (из базы) и из каталога Investfunds.ru."""
+    loaded = (db.groupby(C_FUND, as_index=False)
+                .agg(**{C_UK: (C_UK, "first"), C_TYPE: (C_TYPE, "first"), C_NAV: (C_NAV, "first"),
+                        C_NAV_DATE: (C_NAV_DATE, "first"), C_URL: (C_URL, "first"),
+                        C_SOURCE: (C_SOURCE, "first")}))
+    loaded["loaded"] = True
+    if catalog is None or catalog.empty:
+        return loaded
+    cat = catalog[~catalog[C_FUND].isin(loaded[C_FUND]) & ~catalog[C_URL].isin(loaded[C_URL])].copy()
+    cat[C_SOURCE] = "—"
+    cat["loaded"] = False
+    cols = [C_FUND, C_UK, C_TYPE, C_NAV, C_NAV_DATE, C_URL, C_SOURCE, "loaded"]
+    return pd.concat([loaded[cols], cat[cols]], ignore_index=True)
+
+
+def run_load(targets: list[tuple[str, dict]], force: bool) -> tuple[pd.DataFrame, dict]:
+    """Загружает составы фондов по одному с индикатором прогресса."""
+    if force:
+        fetch_text.clear()
+        fetch_bytes.clear()
+    parts, log = [], {}
+    n = len(targets)
+    bar = st.progress(0.0, text="Подготовка к загрузке…")
+    for i, (fund, meta) in enumerate(targets, start=1):
+        bar.progress((i - 1) / n, text=f"Фонд {i} из {n}: {fund[:45]}")
+        try:
+            rows, src, notes = load_fund_composition(fund, meta)
+        except Exception as exc:  # noqa: BLE001
+            rows, src, notes = [], "", [f"непредвиденная ошибка: {exc}"]
+        if rows:
+            parts.append(pd.DataFrame(rows, columns=ALL_COLS))
+        log[fund] = (src, notes)
+    bar.progress(1.0, text="Загрузка завершена")
+    time.sleep(0.4)
+    bar.empty()
+    new = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=ALL_COLS)
+    return new, log
+
+
+def _store_log(log: dict) -> None:
+    st.session_state.update_log = dict(time=datetime.now().strftime("%d.%m.%Y %H:%M"), funds=log)
+
+
+def apply_loaded(new: pd.DataFrame, log: dict) -> None:
+    st.session_state.db = replace_funds(st.session_state.db, new)
+    _store_log(log)
+
+
+def sidebar(meta_all: pd.DataFrame) -> tuple[list[str], list[str]]:
     sb = st.sidebar
     sb.header("⚙️ Фильтры")
-    uk_all = sorted(db[C_UK].dropna().unique())
-    types_all = sorted(db[C_TYPE].dropna().unique(),
+    uk_all = sorted(meta_all[C_UK].dropna().unique())
+    types_all = sorted(meta_all[C_TYPE].dropna().unique(),
                        key=lambda t: {"БПИФ": 0, "ОПИФ": 1, "ИПИФ": 2}.get(t, 9))
     sel_uk = sb.multiselect("Управляющие компании", uk_all, default=uk_all,
                             placeholder="Выберите управляющие компании")
     sel_types = sb.multiselect("Тип фонда", types_all, default=types_all,
                                placeholder="Выберите тип фонда")
 
+    # ---------------- Список фондов ----------------
     sb.divider()
-    sb.header("🔄 Обновление данных")
+    sb.header("📋 Список фондов")
+    n_all, n_loaded = len(meta_all), int(meta_all["loaded"].sum())
+    sb.caption(f"Фондов в списке: {n_all}, состав загружен: {n_loaded}.")
+    with sb.expander("Загрузить список фондов с Investfunds.ru"):
+        st.caption("Каталог сканируется постранично (по 50 фондов). Берутся сформированные открытые, "
+                   "биржевые и интервальные фонды категорий «акции» и «смешанные инвестиции». "
+                   "Результат кэшируется на сутки.")
+        max_pages = st.number_input("Сколько страниц каталога просмотреть", 1, 150, 100, step=10)
+        if st.button("Загрузить список фондов", type="primary", **WIDE):
+            bar = st.progress(0.0, text="Загрузка каталога…")
+            cat, errors = discover_all_equity_funds(
+                int(max_pages), progress=lambda p, n: bar.progress(min(p / n, 1.0),
+                                                                    text=f"Страница каталога {p}"))
+            bar.empty()
+            if not cat.empty:
+                known = set(FUNDS_URLS.values())
+                cat = cat[~cat[C_URL].isin(known)]
+                old = st.session_state.get("catalog")
+                st.session_state.catalog = (pd.concat([old, cat]).drop_duplicates(C_URL, keep="last")
+                                            if old is not None and not old.empty else cat)
+            st.session_state.catalog_msg = (
+                ("success", f"Найдено фондов акций и смешанных инвестиций: {len(cat)}.")
+                if not cat.empty else
+                ("error", "Не удалось загрузить каталог: " + ("; ".join(errors) or "фонды не найдены")))
+            st.rerun()
+    msg = st.session_state.pop("catalog_msg", None)
+    if msg:
+        (sb.success if msg[0] == "success" else sb.error)(msg[1])
+
+    # ---------------- Составы ----------------
+    sb.divider()
+    sb.header("🔄 Составы фондов")
+    sb.caption("Порядок источников: справка о СЧА с сайта УК (полный состав) → структура на странице "
+               "фонда на сайте УК → ТОП-10 с Investfunds.ru. Если всё недоступно, данные фонда не меняются.")
+    max_n = sb.number_input("Сколько фондов загрузить за раз", 1, 300, 25, step=5,
+                            help="Берутся фонды из текущих фильтров, начиная с самых крупных по СЧА.")
+    only_new = sb.checkbox("Только фонды без актуального состава", value=True,
+                           help="Пропустить фонды, состав которых уже загружен с сайтов УК.")
     force = sb.checkbox("Не использовать кэш (загрузить заново)", value=False,
-                        help="Данные с сайта кэшируются на 24 часа.")
-    if sb.button("Обновить данные с Investfunds.ru", type="primary", **WIDE):
-        with sb:
-            new, errors = run_update(FUNDS_URLS, force)
-        st.session_state.db = replace_funds(st.session_state.db, new)
-        st.session_state.update_log = dict(
-            time=datetime.now().strftime("%d.%m.%Y %H:%M"),
-            ok=sorted(new[C_FUND].unique()) if not new.empty else [],
-            errors=errors,
-        )
+                        help="Загруженные страницы и файлы кэшируются на 24 часа.")
+    if sb.button("Загрузить составы", type="primary", **WIDE):
+        pool = meta_all[meta_all[C_UK].isin(sel_uk) & meta_all[C_TYPE].isin(sel_types)]
+        if only_new:
+            pool = pool[~pool[C_SOURCE].isin([SRC_UK_REPORT, SRC_UK_PAGE, SRC_USER_REPORT])]
+        pool = pool.sort_values(C_NAV, ascending=False, na_position="last").head(int(max_n))
+        targets = [(r[C_FUND], r.to_dict()) for _, r in pool.iterrows()]
+        if targets:
+            with sb:
+                new, log = run_load(targets, force)
+            apply_loaded(new, log)
+        else:
+            st.session_state.catalog_msg = ("success", "Все фонды в выборке уже загружены с сайтов УК.")
         st.rerun()
 
-    with sb.expander("🧭 Поиск всех фондов акций в каталоге"):
-        st.caption("Сканирует каталог Investfunds.ru, находит фонды категорий «акции» и "
-                   "«смешанные инвестиции» и добавляет их к анализу.")
-        max_new = st.number_input("Максимум новых фондов", min_value=5, max_value=200, value=30, step=5)
-        if st.button("Найти и загрузить фонды", **WIDE):
-            with st.spinner("Сканирование каталога…"):
-                found, cat_errors = discover_all_equity_funds()
-            known = set(FUNDS_URLS.values()) | set(st.session_state.db[C_URL].dropna())
-            fresh = {f"#auto:{n}": u for n, u in found.items() if u not in known}
-            fresh = dict(list(fresh.items())[: int(max_new)])
-            if not fresh:
-                st.session_state.update_log = dict(
-                    time=datetime.now().strftime("%d.%m.%Y %H:%M"), ok=[],
-                    errors={"Каталог": "; ".join(cat_errors) or "новых фондов не найдено"})
-            else:
-                new, errors = run_update(fresh, force=False)
-                st.session_state.db = replace_funds(st.session_state.db, new)
-                st.session_state.update_log = dict(
-                    time=datetime.now().strftime("%d.%m.%Y %H:%M"),
-                    ok=sorted(new[C_FUND].unique()) if not new.empty else [],
-                    errors={**errors, **({"Каталог": "; ".join(cat_errors)} if cat_errors else {})},
-                )
-            st.rerun()
-
     log = st.session_state.get("update_log")
-    if log:
-        sb.success(f"Обновлено {log['time']}: загружено фондов — {len(log['ok'])}, "
-                   f"с ошибками — {len(log['errors'])}.")
-        if log["errors"]:
-            with sb.expander("Подробности ошибок"):
-                for fund, err in log["errors"].items():
-                    st.markdown(f"• **{fund}** — {err}")
-                st.caption("Для фондов с ошибками сохраняются данные встроенной базы.")
+    if log and log.get("funds"):
+        funds_log = log["funds"]
+        ok = {f: v for f, v in funds_log.items() if v[0]}
+        full = sum(1 for v in ok.values() if v[0].startswith((SRC_UK_REPORT, SRC_UK_PAGE)))
+        sb.success(f"{log['time']}: загружено {len(ok)} из {len(funds_log)} фондов, "
+                   f"из них с сайтов УК — {full}.")
+        with sb.expander("Подробности загрузки"):
+            for fund, (src, notes) in funds_log.items():
+                if src:
+                    st.markdown(f"✅ **{fund}** — {src}")
+                else:
+                    st.markdown(f"⚠️ **{fund}** — состав не получен, оставлены прежние данные")
+                for n in notes:
+                    st.caption(f"• {n}")
 
+    # ---------------- Файлы ----------------
     sb.divider()
     sb.header("📁 Файлы")
+    with sb.expander("📄 Загрузить справку о СЧА (PDF)"):
+        st.caption("Ежемесячная «Справка о стоимости чистых активов» (форма 0420502) с сайта УК "
+                   "содержит полный список акций фонда.")
+        pdf = st.file_uploader("Файл справки", type=["pdf"], key="pdf_up")
+        pdf_url = st.text_input("…или ссылка на PDF", placeholder="https://…/scha-….pdf")
+        if st.button("Разобрать справку", **WIDE, disabled=not (pdf or pdf_url.strip())):
+            try:
+                data = pdf.getvalue() if pdf else fetch_bytes(pdf_url.strip())
+                rep = parse_scha_pdf(data)
+                if not rep["nav"] or len(rep["items"]) < 1:
+                    raise ValueError("в файле не найдены СЧА или таблица «Акции российских акционерных обществ»")
+                st.session_state.pending_report = dict(rep=rep, doc=pdf.name if pdf else pdf_url.strip(),
+                                                       manual=bool(pdf))
+            except Exception as exc:  # noqa: BLE001
+                st.session_state.pending_report = None
+                st.error(f"Не удалось разобрать справку: {exc}")
+        pend = st.session_state.get("pending_report")
+        if pend:
+            rep = pend["rep"]
+            st.info(f"Справка на {rep['date'] or '—'}: СЧА {fmt_mln(rep['nav'] / 1e6)}, акций — "
+                    f"{len(rep['items'])}." + (f" Фонд: «{rep['title']}»." if rep["title"] else ""))
+            names = meta_all.sort_values(C_FUND)[C_FUND].tolist()
+            target = st.selectbox("К какому фонду относится справка", names,
+                                  index=match_fund_by_title(rep["title"], names))
+            if st.button("Применить справку к фонду", type="primary", **WIDE):
+                meta_row = meta_all[meta_all[C_FUND] == target].iloc[0].to_dict()
+                rows = rows_from_report(target, meta_row, rep, pend["doc"])
+                if pend["manual"]:
+                    for r in rows:
+                        r[C_SOURCE] = SRC_USER_REPORT
+                apply_loaded(pd.DataFrame(rows, columns=ALL_COLS),
+                             {target: (f"{SRC_USER_REPORT if pend['manual'] else SRC_UK_REPORT} "
+                                       f"на {rep['date'] or '—'}", [])})
+                st.session_state.pending_report = None
+                st.rerun()
+
     up = sb.file_uploader("Загрузить свой CSV/Excel отчет", type=["csv", "xlsx", "xls"],
                           help="Обязательные колонки: «Фонд», «Компания» или «Тикер», "
                                "«Доля в фонде, %». Остальные колонки — как в выгрузке базы.")
@@ -1080,61 +1909,174 @@ def sidebar(db: pd.DataFrame) -> tuple[list[str], list[str]]:
 
     db_now = st.session_state.db
     sb.download_button("Скачать текущую базу (CSV)", data=db_to_csv(db_now),
-                       file_name=f"pif_akcii_{datetime.now():%Y%m%d}.csv", mime="text/csv",
-                       **WIDE)
+                       file_name=f"pif_akcii_{datetime.now():%Y%m%d}.csv", mime="text/csv", **WIDE)
     sb.download_button("Скачать текущую базу (Excel)", data=db_to_excel(db_now),
                        file_name=f"pif_akcii_{datetime.now():%Y%m%d}.xlsx",
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                       **WIDE)
-    if sb.button("Сбросить к встроенной базе", **WIDE):
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", **WIDE)
+    if sb.button("Сбросить составы к встроенной базе", **WIDE):
         st.session_state.db = build_default_db().copy()
         st.session_state.pop("update_log", None)
         st.rerun()
     return sel_uk, sel_types
 
 
-def tab_funds(fdb: pd.DataFrame) -> None:
-    nav_by_fund = fdb.groupby(C_FUND)[C_NAV].first().sort_values(ascending=False)
-    fund = st.selectbox("Фонд", nav_by_fund.index.tolist(), index=0,
-                        placeholder="Начните вводить название фонда",
-                        help="Список отсортирован по СЧА. Можно начать вводить название для поиска.")
-    fd = fdb[fdb[C_FUND] == fund].sort_values(C_WEIGHT, ascending=False).reset_index(drop=True)
-    head = fd.iloc[0]
+TOTAL_FUND = "📊 ИТОГО — все выбранные фонды"
+TOTAL_STOCK = "__TOTAL__"
+C_HOLDERS = "Фондов-держателей"
 
+
+def _date_range(values) -> str:
+    """Список дат «дд.мм.гггг» → «30.09.2026» или «30.06.2026 – 30.09.2026»."""
+    d = pd.to_datetime(pd.Series(list(values)), format="%d.%m.%Y", errors="coerce").dropna()
+    if d.empty:
+        return "—"
+    lo, hi = d.min().strftime("%d.%m.%Y"), d.max().strftime("%d.%m.%Y")
+    return lo if lo == hi else f"{lo} – {hi}"
+
+
+def aggregate_total(fdb: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+    """
+    Сводный портфель (ИТОГО) всех фондов в выборке: позиции суммируются по стоимости,
+    доля = стоимость позиции / суммарная СЧА × 100.
+    """
+    navs = fdb.groupby(C_FUND)[C_NAV].first()
+    nav_total = float(navs.sum(skipna=True))
+    df = fdb.copy()
+    df["_key"] = df[C_TICKER].where(df[C_TICKER] != NO_TICKER, df[C_COMPANY])
+    agg = (df.groupby("_key", as_index=False)
+             .agg(**{C_TICKER: (C_TICKER, "first"), C_COMPANY: (C_COMPANY, "first"),
+                     C_SECTOR: (C_SECTOR, "first"), C_ASSET: (C_ASSET, "first"),
+                     C_VALUE: (C_VALUE, "sum"), C_HOLDERS: (C_FUND, "nunique")})
+             .drop(columns="_key"))
+    agg[C_WEIGHT] = agg[C_VALUE] / nav_total * 100 if nav_total > 0 else float("nan")
+    agg = agg.sort_values(C_VALUE, ascending=False).reset_index(drop=True)
+    sources = fdb.groupby(C_FUND)[C_SOURCE].first().value_counts()
+    summary = dict(
+        nav=nav_total, n_funds=int(navs.size), n_uk=int(fdb[C_UK].nunique()),
+        n_types=", ".join(sorted(fdb[C_TYPE].dropna().unique())),
+        struct_dates=_date_range(fdb.groupby(C_FUND)[C_DATE].first()),
+        nav_dates=_date_range(fdb.groupby(C_FUND)[C_NAV_DATE].first()),
+        sources="; ".join(f"{k} — {v}" for k, v in sources.items()),
+    )
+    return agg, summary
+
+
+def aggregate_stocks(fdb: pd.DataFrame) -> pd.DataFrame:
+    """Сводка по всем акциям в выборке фондов."""
+    eq = fdb[fdb[C_ASSET] == ASSET_EQUITY].copy()
+    eq["_key"] = eq[C_TICKER].where(eq[C_TICKER] != NO_TICKER, eq[C_COMPANY])
+    agg = (eq.groupby("_key")
+             .agg(ticker=(C_TICKER, "first"), company=(C_COMPANY, "first"),
+                  sector=(C_SECTOR, "first"), total=(C_VALUE, "sum"),
+                  funds=(C_FUND, "nunique"), avg_w=(C_WEIGHT, "mean"))
+             .sort_values("total", ascending=False))
+    all_eq = agg["total"].sum()
+    agg["share"] = agg["total"] / all_eq * 100 if all_eq > 0 else float("nan")
+    return agg
+
+
+def _fund_label(meta: pd.DataFrame):
+    loaded = dict(zip(meta[C_FUND], meta["loaded"]))
+    return lambda f: f if f == TOTAL_FUND or loaded.get(f, True) else f"{f} · состав не загружен"
+
+
+def _not_loaded_view(fund: str, meta_row: dict) -> None:
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Управляющая компания", head[C_UK])
-    c2.metric("Тип фонда", head[C_TYPE])
-    c3.metric("СЧА", fmt_mln(head[C_NAV], 0), help=f"Стоимость чистых активов на {head[C_NAV_DATE]}")
-    c4.metric("Дата актуальности данных", head[C_DATE],
-              help=f"Дата структуры портфеля. СЧА — на {head[C_NAV_DATE]}.")
+    c1.metric("Управляющая компания", meta_row.get(C_UK) or "—")
+    c2.metric("Тип фонда", meta_row.get(C_TYPE) or "—")
+    c3.metric("СЧА", fmt_mln(meta_row.get(C_NAV), 0))
+    c4.metric("Дата СЧА", meta_row.get(C_NAV_DATE) or "—")
+    st.info("Состав этого фонда ещё не загружен. Будут опробованы справка о СЧА и страница фонда на "
+            "сайте управляющей компании, затем ТОП-10 с Investfunds.ru.")
+    b1, b2 = st.columns([1, 2])
+    with b1:
+        if st.button("📥 Загрузить состав этого фонда", type="primary"):
+            new, log = run_load([(fund, meta_row)], force=False)
+            apply_loaded(new, log)
+            st.rerun()
+    with b2:
+        if is_fund_page(meta_row.get(C_URL)):
+            st.link_button("🔗 Страница фонда на Investfunds.ru", meta_row[C_URL])
 
-    equities = fd[fd[C_ASSET] == ASSET_EQUITY]
-    top10 = fd[~fd[C_COMPANY].isin([CASH_NAME, REST_NAME])].head(10)[C_WEIGHT].sum()
+
+def tab_funds(fdb: pd.DataFrame, meta: pd.DataFrame) -> None:
+    order = meta.sort_values(["loaded", C_NAV], ascending=[False, False], na_position="last")
+    options = [TOTAL_FUND] + order[C_FUND].tolist()
+    fund = st.selectbox("Фонд", options, index=1 if len(options) > 1 else 0,
+                        format_func=_fund_label(meta),
+                        placeholder="Начните вводить название фонда",
+                        help="Первый пункт «ИТОГО» — сводный портфель всех фондов с загруженным составом. "
+                             "Остальные фонды отсортированы по СЧА; фонды из каталога без состава — в конце.")
+    is_total = fund == TOTAL_FUND
+    if is_total and fdb.empty:
+        st.info("Ни у одного фонда в выборке ещё нет загруженного состава.")
+        return
+    if not is_total and fund not in set(fdb[C_FUND]):
+        _not_loaded_view(fund, meta[meta[C_FUND] == fund].iloc[0].to_dict())
+        return
+    pf_word = "сводном портфеле" if is_total else "фонде"
+
+    if is_total:
+        fd, sm = aggregate_total(fdb)
+        nav = sm["nav"]
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Фондов в выборке", f"{sm['n_funds']}", help=f"Типы фондов: {sm['n_types']}")
+        c2.metric("Управляющих компаний", f"{sm['n_uk']}")
+        c3.metric("Суммарная СЧА", fmt_mln(nav, 0), help=f"Даты СЧА: {sm['nav_dates']}")
+        c4.metric("Дата актуальности данных", sm["struct_dates"],
+                  help=f"Даты структуры портфелей. СЧА — {sm['nav_dates']}.")
+        n_missing = int((~meta["loaded"]).sum())
+        if n_missing:
+            st.caption(f"В «ИТОГО» учтены только фонды с загруженным составом: {sm['n_funds']} из {len(meta)}.")
+    else:
+        fd = fdb[fdb[C_FUND] == fund].sort_values(C_WEIGHT, ascending=False).reset_index(drop=True)
+        head = fd.iloc[0]
+        nav = head[C_NAV]
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Управляющая компания", head[C_UK])
+        c2.metric("Тип фонда", head[C_TYPE])
+        c3.metric("СЧА", fmt_mln(nav, 0), help=f"Стоимость чистых активов на {head[C_NAV_DATE]}")
+        c4.metric("Дата актуальности данных", head[C_DATE],
+                  help=f"Дата структуры портфеля. СЧА — на {head[C_NAV_DATE]}.")
+
+    service = [CASH_NAME, REST_NAME]
+    real = fd[~fd[C_COMPANY].isin(service)]
+    equities = fd[fd[C_ASSET] == ASSET_EQUITY].sort_values(C_WEIGHT, ascending=False)
     k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Позиций в портфеле", f"{len(fd[~fd[C_COMPANY].isin([CASH_NAME, REST_NAME])])}")
-    k2.metric("Доля ТОП-10", fmt_pct(top10, 1))
+    k1.metric("Позиций в портфеле" if not is_total else "Уникальных позиций", f"{len(real)}")
+    k2.metric("Доля ТОП-10", fmt_pct(real.head(10)[C_WEIGHT].sum(), 1))
     k3.metric("Доля акций", fmt_pct(equities[C_WEIGHT].sum(), 1))
     if not equities.empty:
         big = equities.iloc[0]
         k4.metric(f"Крупнейшая позиция · {fmt_pct(big[C_WEIGHT], 1)}", big[C_COMPANY],
                   help=f"{big[C_TICKER]} — {fmt_mln(big[C_VALUE])}")
 
-    lc, rc = st.columns([3, 2])
-    with lc:
-        if is_fund_page(head[C_URL]):
-            st.link_button("🔗 Открыть страницу фонда на Investfunds.ru", head[C_URL])
-        else:
-            st.link_button("🔗 Открыть Investfunds.ru", head[C_URL] or BASE_URL)
-            st.caption("Точный адрес страницы этого фонда не указан в реестре.")
-    with rc:
-        src = head[C_SOURCE]
-        note = ("ТОП-10 позиций с сайта, остальное — «Прочие активы»."
-                if src == SRC_SITE else
-                "Ориентировочный состав. Для актуальных данных нажмите «Обновить данные» в боковой панели."
-                if src == SRC_BUILTIN else "Данные из загруженного файла.")
-        st.caption(f"Источник: **{src}**. {note}")
+    if is_total:
+        st.caption(f"Сводный портфель: позиции всех фондов сложены по оценочной стоимости, "
+                   f"доля считается от суммарной СЧА. Источники данных (число фондов): {sm['sources']}.")
+    else:
+        l1, l2, l3, rc = st.columns([1.3, 1.3, 1.1, 2.3])
+        with l1:
+            if is_fund_page(head[C_URL]):
+                st.link_button("🔗 Investfunds.ru", head[C_URL])
+            else:
+                st.link_button("🔗 Investfunds.ru", head[C_URL] or BASE_URL,
+                               help="Точный адрес страницы этого фонда не указан в реестре.")
+        with l2:
+            doc = head.get(C_DOC)
+            if isinstance(doc, str) and doc.startswith("http"):
+                st.link_button("📄 Документ-источник", doc)
+        with l3:
+            if st.button("🔄 Обновить состав", help="Загрузить состав этого фонда заново"):
+                meta_row = meta[meta[C_FUND] == fund].iloc[0].to_dict()
+                new, log = run_load([(fund, meta_row)], force=True)
+                apply_loaded(new, log)
+                st.rerun()
+        with rc:
+            src = head[C_SOURCE]
+            st.caption(f"Источник: **{src}**. {SOURCE_NOTES.get(src, '')}")
 
-    st.markdown("#### Структура портфеля")
+    st.markdown("#### Структура сводного портфеля" if is_total else "#### Структура портфеля")
     g1, g2 = st.columns([3, 2])
     with g1:
         top_n = st.slider("Сколько крупнейших позиций показать на диаграмме", 5, 20, 10)
@@ -1152,14 +2094,16 @@ def tab_funds(fdb: pd.DataFrame) -> None:
             labels=labels, values=values, customdata=money, hole=0.55, sort=False,
             direction="clockwise", marker=dict(colors=PALETTE, line=dict(color="white", width=1)),
             texttemplate="%{value:.1f} %", textposition="inside",
-            hovertemplate="<b>%{label}</b><br>Доля в фонде: %{value:.2f} %"
+            hovertemplate=f"<b>%{{label}}</b><br>Доля в {pf_word}: %{{value:.2f}} %"
                           "<br>Стоимость позиции: %{customdata:,.1f} млн руб.<extra></extra>",
         ))
+        nav_label = "Суммарная СЧА" if is_total else "СЧА"
         fig.update_layout(
             separators=", ", height=470, margin=dict(t=30, b=10, l=10, r=10),
-            title=dict(text=f"ТОП-{top_n} активов фонда", x=0, font=dict(size=15)),
+            title=dict(text=f"ТОП-{top_n} активов " + ("всех фондов" if is_total else "фонда"),
+                       x=0, font=dict(size=15)),
             legend=dict(title=dict(text="Эмитенты"), font=dict(size=12)),
-            annotations=[dict(text=f"СЧА<br><b>{fmt_ru(head[C_NAV], 0)}</b><br>млн руб.",
+            annotations=[dict(text=f"{nav_label}<br><b>{fmt_ru(nav, 0)}</b><br>млн руб.",
                               showarrow=False, font=dict(size=14))],
         )
         st.plotly_chart(fig, config=PLOTLY_CONFIG, **CHART_W)
@@ -1173,18 +2117,69 @@ def tab_funds(fdb: pd.DataFrame) -> None:
         fig_s.update_layout(
             separators=", ", height=470 + 20, margin=dict(t=60, b=10, l=10, r=40),
             title=dict(text="Распределение по секторам", x=0, font=dict(size=15)),
-            xaxis_title="Доля в фонде, %", yaxis_title=None, showlegend=False,
+            xaxis_title=f"Доля в {pf_word}, %", yaxis_title=None, showlegend=False,
         )
         st.plotly_chart(fig_s, config=PLOTLY_CONFIG, **CHART_W)
 
-    st.markdown("#### Все позиции фонда")
+    st.markdown("#### Все позиции сводного портфеля" if is_total else "#### Все позиции фонда")
     q = st.text_input("Поиск по позициям", placeholder="Тикер, компания или сектор…", key="q_fund")
-    table = fd[[C_TICKER, C_COMPANY, C_SECTOR, C_WEIGHT, C_VALUE]]
-    table = search_filter(table, q, [C_TICKER, C_COMPANY, C_SECTOR])
+    cols = [C_TICKER, C_COMPANY, C_SECTOR, C_WEIGHT, C_VALUE] + ([C_HOLDERS] if is_total else [])
+    table = search_filter(fd[cols], q, [C_TICKER, C_COMPANY, C_SECTOR])
+    if is_total:
+        table = table.rename(columns={C_WEIGHT: "Доля в сводном портфеле, %",
+                                      C_VALUE: "Суммарная стоимость позиции, млн руб."})
+        pct_c, mln_c = "Доля в сводном портфеле, %", "Суммарная стоимость позиции, млн руб."
+    else:
+        pct_c, mln_c = C_WEIGHT, C_VALUE
     st.caption(f"Показано позиций: {len(table)} из {len(fd)}. "
                "Сортировка — щелчком по заголовку колонки.")
     st.dataframe(
-        styled(table, pct_cols=[C_WEIGHT], mln_cols=[C_VALUE]),
+        styled(table, pct_cols=[pct_c], mln_cols=[mln_c]),
+        **WIDE, hide_index=True, height=min(38 + 35 * max(len(table), 1), 640),
+    )
+
+
+def _stocks_total_view(agg: pd.DataFrame, fdb: pd.DataFrame) -> None:
+    """ИТОГО по всем акциям: сводка, диаграмма крупнейших бумаг и полная таблица."""
+    n_funds_eq = fdb.loc[fdb[C_ASSET] == ASSET_EQUITY, C_FUND].nunique()
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Бумаг в портфелях фондов", f"{len(agg)}")
+    c2.metric("Фондов с акциями", f"{n_funds_eq}")
+    c3.metric("Суммарная стоимость акций", fmt_mln(agg["total"].sum(), 0))
+    c4.metric("Держателей на одну бумагу", fmt_ru(agg["funds"].mean(), 1),
+              help="Среднее число фондов, владеющих одной бумагой.")
+
+    top_n = st.slider("Сколько бумаг показать на диаграмме", 10, 50, 20, step=5, key="top_stocks")
+    top = agg.head(top_n).reset_index(drop=True)
+    top["Бумага"] = [f"{t} · {c}" if t != NO_TICKER else c for t, c in zip(top.ticker, top.company)]
+    fig_t = px.bar(top.iloc[::-1], x="total", y="Бумага", orientation="h",
+                   custom_data=["funds", "avg_w", "share"], color_discrete_sequence=["#00A389"])
+    fig_t.update_traces(
+        texttemplate="%{x:,.0f}", textposition="outside", cliponaxis=False,
+        hovertemplate="<b>%{y}</b><br>Суммарная стоимость: %{x:,.1f} млн руб."
+                      "<br>Доля от всех акций в фондах: %{customdata[2]:.2f} %"
+                      "<br>Фондов-держателей: %{customdata[0]}"
+                      "<br>Средняя доля в портфелях: %{customdata[1]:.2f} %<extra></extra>")
+    fig_t.update_layout(separators=", ", height=max(360, 28 * len(top) + 120),
+                        margin=dict(t=50, b=10, l=10, r=60),
+                        title=dict(text=f"ТОП-{top_n} бумаг по суммарной стоимости пакетов",
+                                   x=0, font=dict(size=15)),
+                        xaxis_title="Суммарная стоимость пакетов, млн руб.", yaxis_title=None)
+    st.plotly_chart(fig_t, config=PLOTLY_CONFIG, **CHART_W)
+
+    st.markdown("#### Все акции в портфелях фондов")
+    table = agg.reset_index(drop=True).rename(columns={
+        "ticker": "Тикер", "company": "Компания", "sector": "Сектор", "funds": C_HOLDERS,
+        "total": "Суммарная стоимость пакетов, млн руб.",
+        "share": "Доля от всех акций в фондах, %", "avg_w": "Средняя доля в портфелях, %",
+    })[["Тикер", "Компания", "Сектор", C_HOLDERS, "Суммарная стоимость пакетов, млн руб.",
+        "Доля от всех акций в фондах, %", "Средняя доля в портфелях, %"]]
+    q = st.text_input("Поиск по акциям", placeholder="Тикер, компания или сектор…", key="q_all_stocks")
+    table = search_filter(table, q, ["Тикер", "Компания", "Сектор"])
+    st.caption(f"Показано бумаг: {len(table)} из {len(agg)}. Сортировка — щелчком по заголовку колонки.")
+    st.dataframe(
+        styled(table, pct_cols=["Доля от всех акций в фондах, %", "Средняя доля в портфелях, %"],
+               mln_cols=["Суммарная стоимость пакетов, млн руб."]),
         **WIDE, hide_index=True, height=min(38 + 35 * max(len(table), 1), 640),
     )
 
@@ -1192,21 +2187,24 @@ def tab_funds(fdb: pd.DataFrame) -> None:
 def tab_stocks(fdb: pd.DataFrame) -> None:
     eq = fdb[fdb[C_ASSET] == ASSET_EQUITY].copy()
     if eq.empty:
-        st.info("В отфильтрованных фондах нет позиций в акциях.")
+        st.info("В отфильтрованных фондах нет загруженных позиций в акциях.")
         return
     eq["_key"] = eq[C_TICKER].where(eq[C_TICKER] != NO_TICKER, eq[C_COMPANY])
-    agg = (eq.groupby("_key")
-             .agg(ticker=(C_TICKER, "first"), company=(C_COMPANY, "first"),
-                  sector=(C_SECTOR, "first"), total=(C_VALUE, "sum"),
-                  funds=(C_FUND, "nunique"), avg_w=(C_WEIGHT, "mean"))
-             .sort_values("total", ascending=False))
+    agg = aggregate_stocks(fdb)
     label = {k: (f"{r.ticker} — {r.company}" if r.ticker != NO_TICKER else r.company)
              for k, r in agg.iterrows()}
+    label[TOTAL_STOCK] = "📊 ИТОГО — все акции"
 
-    key = st.selectbox("Акция", agg.index.tolist(), index=0, format_func=lambda k: label[k],
+    key = st.selectbox("Акция", [TOTAL_STOCK] + agg.index.tolist(), index=1,
+                       format_func=lambda k: label[k],
                        placeholder="Введите тикер или название компании",
-                       help="Список отсортирован по суммарной стоимости пакетов во всех фондах. "
-                            "Начните вводить тикер (например, SBER) или название.")
+                       help="Первый пункт «ИТОГО» — сводка по всем бумагам. Остальные отсортированы "
+                            "по суммарной стоимости пакетов. Начните вводить тикер (например, SBER) "
+                            "или название.")
+    if key == TOTAL_STOCK:
+        _stocks_total_view(agg, fdb)
+        return
+
     info = agg.loc[key]
     holders = (eq[eq["_key"] == key]
                .groupby(C_FUND, as_index=False)
@@ -1217,7 +2215,8 @@ def tab_stocks(fdb: pd.DataFrame) -> None:
     c1, c2, c3, c4 = st.columns(4)
     c1.metric(f"Тикер: {info.ticker}", info.company, help=f"Сектор: {info.sector}")
     c2.metric("Фондов-держателей", f"{len(holders)}")
-    c3.metric("Суммарная стоимость пакетов", fmt_mln(holders[C_VALUE].sum(), 1))
+    c3.metric("Суммарная стоимость пакетов", fmt_mln(holders[C_VALUE].sum(), 1),
+              help=f"{fmt_pct(info.share)} от стоимости всех акций в выбранных фондах")
     c4.metric("Средняя доля в портфелях", fmt_pct(holders[C_WEIGHT].mean()))
 
     sort_by = st.radio("Сортировать фонды", ["По доле в портфеле", "По стоимости пакета"],
@@ -1261,20 +2260,6 @@ def tab_stocks(fdb: pd.DataFrame) -> None:
             "Ссылка на фонд", display_text="Открыть на Investfunds.ru")},
     )
 
-    with st.expander("📊 Крупнейшие бумаги во всех отфильтрованных фондах"):
-        top = agg.head(20).reset_index(drop=True)
-        top["Бумага"] = [f"{t} · {c}" if t != NO_TICKER else c for t, c in zip(top.ticker, top.company)]
-        fig_t = px.bar(top.iloc[::-1], x="total", y="Бумага", orientation="h",
-                       custom_data=["funds", "avg_w"], color_discrete_sequence=["#00A389"])
-        fig_t.update_traces(
-            texttemplate="%{x:,.0f}", textposition="outside", cliponaxis=False,
-            hovertemplate="<b>%{y}</b><br>Суммарная стоимость: %{x:,.1f} млн руб."
-                          "<br>Фондов-держателей: %{customdata[0]}"
-                          "<br>Средняя доля: %{customdata[1]:.2f} %<extra></extra>")
-        fig_t.update_layout(separators=", ", height=640, margin=dict(t=20, b=10, l=10, r=60),
-                            xaxis_title="Суммарная стоимость пакетов, млн руб.", yaxis_title=None)
-        st.plotly_chart(fig_t, config=PLOTLY_CONFIG, **CHART_W)
-
 
 def main() -> None:
     st.set_page_config(page_title="Позиции ПИФов РФ в акциях", layout="wide", page_icon="📈")
@@ -1282,30 +2267,32 @@ def main() -> None:
 
     if "db" not in st.session_state:
         st.session_state.db = build_default_db().copy()
-    db: pd.DataFrame = st.session_state.db
+    if "catalog" not in st.session_state:
+        st.session_state.catalog = pd.DataFrame(columns=CATALOG_COLS)
 
-    sel_uk, sel_types = sidebar(db)
+    meta_all = fund_universe(st.session_state.db, st.session_state.catalog)
+    sel_uk, sel_types = sidebar(meta_all)
     db = st.session_state.db
+    meta_all = fund_universe(db, st.session_state.catalog)
 
     st.title("📈 Позиции российских ПИФов в акциях")
-    n_site = db.loc[db[C_SOURCE] == SRC_SITE, C_FUND].nunique()
-    n_base = db.loc[db[C_SOURCE] == SRC_BUILTIN, C_FUND].nunique()
-    n_user = db.loc[db[C_SOURCE] == SRC_USER, C_FUND].nunique()
-    parts = [f"с Investfunds.ru — {n_site}", f"из встроенной базы — {n_base}"]
-    if n_user:
-        parts.append(f"из файла — {n_user}")
-    st.caption(f"БПИФ, ОПИФ и ИПИФ, инвестирующие в российские акции. Фондов в базе: "
-               f"{db[C_FUND].nunique()} ({', '.join(parts)}). "
-               "Стоимость позиции = СЧА × доля / 100.")
+    src_counts = db.groupby(C_FUND)[C_SOURCE].first().value_counts()
+    parts = [f"{k} — {v}" for k, v in src_counts.items()]
+    n_cat = int((~meta_all["loaded"]).sum())
+    st.caption(f"БПИФ, ОПИФ и ИПИФ, инвестирующие в российские акции. Фондов с составом: "
+               f"{db[C_FUND].nunique()} ({'; '.join(parts)})"
+               + (f"; из каталога без состава — {n_cat}" if n_cat else "")
+               + ". Стоимость позиции = СЧА × доля / 100.")
 
-    fdb = db[db[C_UK].isin(sel_uk) & db[C_TYPE].isin(sel_types)]
-    if fdb.empty:
+    meta = meta_all[meta_all[C_UK].isin(sel_uk) & meta_all[C_TYPE].isin(sel_types)]
+    if meta.empty:
         st.warning("Нет фондов, подходящих под выбранные фильтры. Измените фильтры в боковой панели.")
         st.stop()
+    fdb = db[db[C_FUND].isin(meta[C_FUND])]
 
     t1, t2 = st.tabs(["📊 Анализ по фондам", "🔎 Анализ по акциям (Кто держит бумагу?)"])
     with t1:
-        tab_funds(fdb)
+        tab_funds(fdb, meta)
     with t2:
         tab_stocks(fdb)
 
