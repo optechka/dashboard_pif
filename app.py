@@ -257,7 +257,8 @@ ALIASES: dict[str, str] = {
     "новабев групп": "BELU", "белуга": "BELU", "лента": "LENT",
     "фикс прайс": "FIXP", "м.видео": "MVID", "хэндерсон": "HNFG", "хендерсон": "HNFG",
     # новые и сокращённые названия
-    "группа позитив": "POSI", "позитив": "POSI", "базис": "BAZA", "гк базис": "BAZA",
+    "озон холдингз": "OZON", "озонхолдингз": "OZON", "ozon holdings": "OZON", "озон холдинг": "OZON",
+    "мкпао озон": "OZON", "группа позитив": "POSI", "позитив": "POSI", "базис": "BAZA", "гк базис": "BAZA",
     "промомед": "PRMD", "займер": "ZAYM", "мфк займер": "ZAYM", "всеинструменты": "VSEH",
     "всеинструменты.ру": "VSEH", "о'кей": "OKEY", "окей": "OKEY", "черкизово": "GCHE", "абрау-дюрсо": "ABRD",
     "куйбышевазот": "KAZT", "генетико": "GECO", "овк": "UWGN", "объединенная вагонная компания": "UWGN",
@@ -482,6 +483,8 @@ def normalize_issuer(name: str) -> str:
 
 
 _ALIAS_KEYS_LONG = sorted((k for k in ALIASES if len(k) >= 5), key=len, reverse=True)
+# те же названия без пробелов и дефисов: «ОзонХолдингз» = «Озон Холдингз», «Т Технологии» = «Т-Технологии»
+_ALIASES_COMPACT = {re.sub(r"[\s\-]", "", k): v for k, v in ALIASES.items()}
 
 
 def resolve_ticker(issuer: str) -> str | None:
@@ -491,6 +494,9 @@ def resolve_ticker(issuer: str) -> str | None:
         return None
     if norm in ALIASES:
         return ALIASES[norm]
+    compact = re.sub(r"[\s\-]", "", norm)
+    if compact in _ALIASES_COMPACT:
+        return _ALIASES_COMPACT[compact]
     up = norm.upper()
     if up in COMPANIES:
         return up
@@ -602,13 +608,25 @@ def normalize_positions(df: pd.DataFrame) -> pd.DataFrame:
         is_eq = g[C_ASSET] == ASSET_EQUITY
         junk = comp.str.contains(_JUNK_RE) & (g[C_TICKER].fillna(NO_TICKER) == NO_TICKER)
         eq = g[is_eq & ~junk].copy()
+        # единые тикер и название: «ОзонХолдингз» / «МКПАО Озон» → OZON «Озон»
+        for i in eq.index:
+            tk = eq.at[i, C_TICKER]
+            if not tk or tk == NO_TICKER or pd.isna(tk):
+                tk = resolve_ticker(str(eq.at[i, C_COMPANY])) or NO_TICKER
+                eq.at[i, C_TICKER] = tk
+            if tk in COMPANIES:
+                eq.at[i, C_COMPANY], sec = COMPANIES[tk]
+                if not eq.at[i, C_SECTOR] or eq.at[i, C_SECTOR] == S_OTHER or pd.isna(eq.at[i, C_SECTOR]):
+                    eq.at[i, C_SECTOR] = sec
         # повторы одной и той же строки (дубли блоков на сайте) — убрать; части одной бумаги — сложить
-        eq = eq.drop_duplicates(subset=[C_TICKER, C_COMPANY, C_WEIGHT])
-        if eq.duplicated(subset=[C_TICKER, C_COMPANY]).any():
-            first = eq.drop_duplicates(subset=[C_TICKER, C_COMPANY]).set_index([C_TICKER, C_COMPANY])
-            sums = eq.groupby([C_TICKER, C_COMPANY])[[C_WEIGHT, C_VALUE]].sum(min_count=1)
+        eq["_key"] = eq[C_TICKER].where(eq[C_TICKER] != NO_TICKER, eq[C_COMPANY])
+        eq = eq.drop_duplicates(subset=["_key", C_WEIGHT])
+        if eq["_key"].duplicated().any():
+            first = eq.drop_duplicates(subset=["_key"]).set_index("_key")
+            sums = eq.groupby("_key")[[C_WEIGHT, C_VALUE]].sum(min_count=1)
             first[[C_WEIGHT, C_VALUE]] = sums
-            eq = first.reset_index()[g.columns]
+            eq = first.reset_index()
+        eq = eq[g.columns]
         non = g[~is_eq & ~junk]
         cash_w = float(non.loc[(non[C_ASSET] == ASSET_CASH) | comp[non.index].str.contains(_CASH_RE),
                                C_WEIGHT].sum())
@@ -2984,13 +3002,13 @@ def main() -> None:
         st.session_state.db = build_default_db().copy()
     if "catalog" not in st.session_state:
         st.session_state.catalog = pd.DataFrame(columns=CATALOG_COLS)
-    if st.session_state.get("data_version") != 3:  # привести старые данные сессии к новому формату
+    if st.session_state.get("data_version") != 4:  # привести старые данные сессии к новому формату
         db0 = normalize_positions(st.session_state.db)
         bad = [f for f in db0[C_FUND].unique() if f not in FUNDS_URLS and is_excluded_name(f)]
         st.session_state.db = db0[~db0[C_FUND].isin(bad)].reset_index(drop=True)
         cat0 = st.session_state.catalog
         st.session_state.catalog = cat0[~cat0[C_FUND].map(is_excluded_name)] if not cat0.empty else cat0
-        st.session_state.data_version = 3
+        st.session_state.data_version = 4
     if not st.session_state.get("autoloaded"):
         st.markdown('<p class="app-title">📈 Позиции российских ПИФов в акциях</p>', unsafe_allow_html=True)
         autoload()
