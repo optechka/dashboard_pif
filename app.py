@@ -74,6 +74,7 @@ BASE_URL = "https://investfunds.ru"
 
 # Автозагрузка при открытии дашборда
 MIN_NAV_MLN = 1000        # в список попадают фонды акций и смешанные фонды с СЧА от этой величины (млн руб.)
+MIN_EQUITY_SHARE = 20.0   # фонды с меньшей долей акций исключаются из выборки, %
 AUTO_CATALOG_PAGES = 20   # сколько страниц каталога Investfunds.ru (по 50 фондов) просматривать
 AUTO_MAX_FUNDS = 300      # предел числа фондов, составы которых загружаются автоматически
 LOAD_WORKERS = 4          # параллельных загрузок (больше — быстрее, но выше риск блокировки сайтом)
@@ -2209,12 +2210,37 @@ def fund_page_info(url: str) -> dict:
     return parse_fund_html(fetch_text(url))
 
 
+# Названия, по которым фонд заведомо не является фондом акций
+_NON_EQUITY_NAME_RE = re.compile(
+    r"накопительн|облигац|денежн\w*\s+рын|ликвидност|сбережен|флоатер|рантье|консерватив|"
+    r"сберегательн|депозит|овернайт|\bофз\b|\bзолот|драгоцен|недвижим|валютн|юан|доллар|евро", re.I)
+
+
+def _equity_share_of_items(items: list[tuple[str, float]]) -> float:
+    """Доля акций среди перечисленных ТОП-активов (в % от суммы их весов)."""
+    total = sum(w for _, w in items)
+    if not total:
+        return 0.0
+    eq = sum(w for n, w in items if classify_asset(n)[3] == ASSET_EQUITY)
+    return eq / total * 100
+
+
 def _is_equity_info(info: dict) -> bool:
     obj = (info.get("object") or "").lower()
     kind = (info.get("kind") or "").lower()
     status = (info.get("status") or "").lower()
-    return (("акци" in obj or "смешан" in obj) and "закрыт" not in kind and info.get("type") != "ЗПИФ"
-            and (not status or "сформирован" in status) and not info.get("qualified"))
+    title = info.get("title") or ""
+    if not (("акци" in obj or "смешан" in obj) and "закрыт" not in kind and info.get("type") != "ЗПИФ"
+            and (not status or "сформирован" in status) and not info.get("qualified")):
+        return False
+    name_flag = bool(_NON_EQUITY_NAME_RE.search(title)) and "акци" not in title.lower()
+    if not (name_flag or "смешан" in obj):
+        return True
+    # «Смешанный» фонд или название вроде «Накопительный» / «Облигации»: решает доля акций
+    # среди крупнейших позиций на Investfunds.ru
+    if info.get("items"):
+        return _equity_share_of_items(info["items"]) >= MIN_EQUITY_SHARE
+    return not name_flag  # данных о составе нет: смешанный оставляем до проверки состава
 
 
 def _parallel(func, items, label: str, bar) -> list:
@@ -2317,6 +2343,24 @@ def _store_log(log: dict) -> None:
 
 
 def apply_loaded(new: pd.DataFrame, log: dict) -> None:
+    if new is not None and not new.empty:
+        new = normalize_positions(new)
+        eq_share = new[new[C_ASSET] == ASSET_EQUITY].groupby(C_FUND)[C_WEIGHT].sum()
+        own = set(FUNDS_URLS)  # фонды из реестра не исключаем
+        full = set(new.loc[new[C_SOURCE].isin([SRC_UK_REPORT, SRC_USER_REPORT]), C_FUND])
+        # без акций — исключаем всегда; по полному составу (справка о СЧА) — если акций меньше порога.
+        # По ТОП-10 долю портфеля не оценить: остаток может состоять из тех же акций.
+        drop = [f for f in new[C_FUND].unique() if f not in own and
+                (eq_share.get(f, 0.0) <= 0 or (f in full and eq_share.get(f, 0.0) < MIN_EQUITY_SHARE))]
+        if drop:
+            new = new[~new[C_FUND].isin(drop)]
+            cat = st.session_state.get("catalog")
+            if cat is not None and not cat.empty:
+                st.session_state.catalog = cat[~cat[C_FUND].isin(drop)]
+            for f in drop:
+                src, notes = log.get(f, ("", []))
+                log[f] = ("", list(notes) + [f"исключён из выборки: доля акций {eq_share.get(f, 0.0):.1f} % "
+                                             f"(меньше {MIN_EQUITY_SHARE:.0f} %)"])
     st.session_state.db = replace_funds(st.session_state.db, new)
     _store_log(log)
 
