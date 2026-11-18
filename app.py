@@ -164,7 +164,7 @@ COMPANIES: dict[str, tuple[str, str]] = {
     "PHOR": ("ФосАгро", S_CHEM), "AKRN": ("Акрон", S_CHEM),
     "NKNC": ("Нижнекамскнефтехим", S_CHEM), "KZOS": ("Казаньоргсинтез", S_CHEM),
     "YDEX": ("Яндекс", S_IT), "OZON": ("Озон", S_IT), "HEAD": ("Хэдхантер", S_IT),
-    "POSI": ("Позитив Текнолоджиз", S_IT), "ASTR": ("Группа Астра", S_IT),
+    "POSI": ("Группа Позитив", S_IT), "ASTR": ("Группа Астра", S_IT),
     "VKCO": ("ВК", S_IT), "DATA": ("Аренадата", S_IT), "DIAS": ("Диасофт", S_IT),
     "SOFL": ("Софтлайн", S_IT), "CNRU": ("Циан", S_IT),
     "IVAT": ("ИВА Технологии", S_IT), "ELMT": ("Элемент", S_IT),
@@ -190,6 +190,12 @@ COMPANIES: dict[str, tuple[str, str]] = {
     "OZPH": ("Озон Фармацевтика", S_MED), "ABIO": ("Артген", S_MED),
     "AFKS": ("АФК Система", S_HOLD),
     "SGZH": ("Сегежа", S_IND), "KMAZ": ("КАМАЗ", S_IND),
+    "BAZA": ("Базис", S_IT), "PRMD": ("Промомед", S_MED), "ZAYM": ("Займер", S_FIN),
+    "VSEH": ("ВсеИнструменты", S_CONS), "OKEY": ("О'КЕЙ", S_CONS), "GCHE": ("Черкизово", S_CONS),
+    "ABRD": ("Абрау-Дюрсо", S_CONS), "KAZT": ("КуйбышевАзот", S_CHEM), "GECO": ("Генетико", S_MED),
+    "UWGN": ("ОВК", S_IND), "SVAV": ("Соллерс", S_IND), "NKHP": ("НКХП", S_TRN),
+    "TTLK": ("Таттелеком", S_TEL), "LNZL": ("Лензолото", S_MET), "MRKC": ("Россети Центр", S_ENE),
+    "MRKU": ("Россети Урал", S_ENE), "LSNGP": ("Россети Ленэнерго (прив.)", S_ENE), "CHMK": ("ЧМК", S_MET),
 }
 
 # Специальные «псевдотикеры» для неакционных строк встроенной базы
@@ -249,7 +255,17 @@ ALIASES: dict[str, str] = {
     "сегежа": "SGZH", "сегежа групп": "SGZH", "камаз": "KMAZ",
     "инарктика": "AQUA", "русагро": "RAGR", "новабев": "BELU",
     "новабев групп": "BELU", "белуга": "BELU", "лента": "LENT",
-    "фикс прайс": "FIXP", "м.видео": "MVID", "хэндерсон": "HNFG",
+    "фикс прайс": "FIXP", "м.видео": "MVID", "хэндерсон": "HNFG", "хендерсон": "HNFG",
+    # новые и сокращённые названия
+    "группа позитив": "POSI", "позитив": "POSI", "базис": "BAZA", "гк базис": "BAZA",
+    "промомед": "PRMD", "займер": "ZAYM", "мфк займер": "ZAYM", "всеинструменты": "VSEH",
+    "всеинструменты.ру": "VSEH", "о'кей": "OKEY", "окей": "OKEY", "черкизово": "GCHE", "абрау-дюрсо": "ABRD",
+    "куйбышевазот": "KAZT", "генетико": "GECO", "овк": "UWGN", "объединенная вагонная компания": "UWGN",
+    "соллерс": "SVAV", "таттелеком": "TTLK", "лензолото": "LNZL", "делимобиль": "DELI",
+    "мосбиржа": "MOEX", "сбер": "SBER", "яндекс мкпао": "YDEX", "yandex": "YDEX", "ozon": "OZON",
+    "мтс банк": "MBNK", "ростелеком ап": "RTKM", "россети центр": "MRKC", "россети урал": "MRKU",
+    "челябинский металлургический комбинат": "CHMK", "чмк": "CHMK", "юнипро": "UPRO",
+    "русгидро": "HYDR", "магнит": "MGNT", "мать и дитя": "MDMG", "мд медикал груп инвестментс": "MDMG",
 }
 # Привилегированные акции: обыкновенный тикер → тикер «префов»
 PREF_MAP = {"SBER": "SBERP", "TATN": "TATNP", "SNGS": "SNGSP", "MTLR": "MTLRP"}
@@ -515,7 +531,7 @@ def classify_asset(raw_name: str) -> tuple[str, str, str, str]:
     has_equity_mark = bool(re.search(r"акци|расписк|депозитарн", low))
     if not has_equity_mark:  # тип бумаги не указан — не считаем акцией
         return NO_TICKER, issuer.strip(), S_OTHER, ASSET_OTHER
-    ticker = resolve_ticker(issuer)
+    ticker = resolve_ticker_ext(issuer)
     if ticker:
         if "прив" in kind:
             ticker = PREF_MAP.get(ticker, ticker)
@@ -1147,6 +1163,51 @@ def isin_to_ticker_moex(isin: str) -> tuple[str, str] | None:
     return (best[0], best[2]) if best else None
 
 
+# Названия секторов и классов активов — их по названию НЕ ищем (иначе «Технологии» → «Т-Технологии»)
+_SECTOR_WORDS = re.compile(
+    r"^(энергоносител\w*|финанс\w*|природн\w* ресурс\w*|технолог\w*|товар\w*.*|промышленност\w*|"
+    r"коммуникаци\w*|нефть и газ|нефтегаз\w*.*|металл\w*.*|электроэнергетик\w*|потребительск\w*.*|"
+    r"it.*|ит.*|здравоохранени\w*|недвижимост\w*|транспорт\w*.*|хими\w*.*|телеком\w*|материал\w*|"
+    r"сырь\w*|банк\w*|ритейл|удобрени\w*|прочие.*|прочее|иное|акции|облигации|денежн\w*.*|"
+    r"девелопмент|строительств\w*|сельск\w*.*|информационн\w*.*|энергетик\w*|горнодобы\w*.*)$", re.I)
+
+
+@st.cache_data(ttl=7 * 86400, show_spinner=False)
+def name_to_ticker_moex(name: str) -> str | None:
+    """Поиск акции по названию через ISS МосБиржи (только акции основного режима торгов)."""
+    if _ISS_STATE["down"]:
+        return None
+    norm = normalize_issuer(name)
+    words = [w for w in re.findall(r"[а-яa-z0-9]+", norm) if len(w) >= 4]
+    if not words or _SECTOR_WORDS.match(norm):
+        return None
+    key = max(words, key=len)
+    url = ("https://iss.moex.com/iss/securities.json?iss.meta=off&q=" + requests.utils.quote(key) +
+           "&securities.columns=secid,shortname,name,type,primary_boardid,is_traded")
+    try:
+        data = requests.get(url, headers=HEADERS, timeout=6).json()["securities"]["data"]
+    except Exception:  # noqa: BLE001
+        _ISS_STATE["down"] = True
+        return None
+    for secid, short, full, typ, board, traded in data:
+        if typ in ("common_share", "preferred_share") and board == "TQBR" and traded in (1, None):
+            hay = normalize_issuer(f"{short} {full}")
+            if key in hay:
+                return secid
+    return None
+
+
+def resolve_ticker_ext(name: str) -> str | None:
+    """Тикер по названию: справочник → поиск на МосБирже (для новых и переименованных компаний)."""
+    tk = resolve_ticker(name)
+    if tk:
+        return tk
+    norm = normalize_issuer(name)
+    if not norm or _SECTOR_WORDS.match(norm) or _JUNK_RE.search(norm):
+        return None
+    return name_to_ticker_moex(name)
+
+
 def _extract_date(text: str) -> datetime | None:
     s = str(text)
     for pat, fmt in ((r"(\d{2}\.\d{2}\.\d{4})", "%d.%m.%Y"), (r"(\d{2}-\d{2}-\d{4})", "%d-%m-%Y"),
@@ -1534,7 +1595,7 @@ def _structure_from_scripts(html: str) -> dict:
             cash = w if cash is None else cash
             continue
         clean = re.sub(r"(?i)\s+(ао|ап|обыкн\.?|прив\.?)$", "", name)
-        if _JUNK_RE.search(name) or not resolve_ticker(clean) or name.lower() in seen:
+        if _JUNK_RE.search(name) or not resolve_ticker_ext(clean) or name.lower() in seen:
             continue
         seen.add(name.lower())
         items.append((name, w))
@@ -1590,8 +1651,9 @@ def parse_uk_structure_html(html: str) -> dict:
                 cash = w if cash is None else cash
                 continue
             clean = re.sub(r"(?i)\s+(ао|ап|обыкн\.?|прив\.?)$", "", name.strip())
-            if name.strip().lower() in _ASSET_CLASS_WORDS or _JUNK_RE.search(name) or not resolve_ticker(clean):
-                continue  # не эмитент (класс активов, показатель) или не удалось распознать
+            if name.strip().lower() in _ASSET_CLASS_WORDS or _JUNK_RE.search(name) \
+                    or not resolve_ticker_ext(clean):
+                continue  # не эмитент (класс активов, сектор, показатель) или не удалось распознать
             items.append((name.strip(), w))
         if len(items) >= 3 and len(items) > len(best["items"]):
             best = dict(items=items, date=date, cash=cash)
@@ -1605,7 +1667,7 @@ def rows_from_uk_page(fund: str, meta: dict, st_: dict, nav_mln, nav_date, page_
     agg: dict[tuple, dict] = {}
     for name, w in st_["items"]:
         clean = re.sub(r"(?i)\s+(ао|ап|ао\.|ап\.|обыкн\.?|прив\.?)$", "", name).strip()
-        tk = resolve_ticker(clean)
+        tk = resolve_ticker_ext(clean)
         if tk and re.search(r"(?i)\s(ап|прив\.?)$", name):
             tk = PREF_MAP.get(tk, tk)
         company, sector = COMPANIES.get(tk, (clean, S_OTHER)) if tk else (clean, S_OTHER)
