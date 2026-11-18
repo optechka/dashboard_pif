@@ -80,14 +80,11 @@ HEADERS = {
 }
 
 # --- Реестр фондов с акциями на Investfunds.ru ---
-# Для трёх фондов точная страница не указана (стоит общий адрес сайта):
-# их данные берутся из встроенной базы. Чтобы включить парсинг, замените
-# адрес на вид https://investfunds.ru/funds/<номер>/
 FUNDS_URLS: dict[str, str] = {
     # УК «Первая»
     "Первая — Фонд Топ Российских акций (SBMX)": "https://investfunds.ru/funds/5247/",
-    "Первая — Фонд российских акций": "https://investfunds.ru",
-    "Первая — Фонд акций с выплатой дохода": "https://investfunds.ru",
+    "Первая — Фонд российских акций": "https://investfunds.ru/funds/43/",
+    "Первая — Фонд акций с выплатой дохода": "https://investfunds.ru/funds/8123/",
     "Первая — Акции средней и малой капитализации (SBSC)": "https://investfunds.ru/funds/9469/",
     # УК «ВИМ Инвестиции»
     "ВИМ — Индекс МосБиржи (EQMX)": "https://investfunds.ru/funds/6073/",
@@ -105,7 +102,7 @@ FUNDS_URLS: dict[str, str] = {
     # УК «Т-Капитал»
     "Т-Капитал — Индекс МосБиржи (TMOS)": "https://investfunds.ru/funds/6333/",
     "Т-Капитал — Акции роста (TITR)": "https://investfunds.ru/funds/10421/",
-    "Т-Капитал — Компании второго эшелона": "https://investfunds.ru",
+    "Т-Капитал — Компании второго эшелона": "https://investfunds.ru/funds/10151/",
     # Прочие крупные УК
     "АТОН — Российские акции + (AMRE)": "https://investfunds.ru/funds/6809/",
     "Райффайзен — Акции": "https://investfunds.ru/funds/281/",
@@ -128,7 +125,7 @@ S_HOLD = "Холдинги"
 S_IND = "Промышленность"
 S_BONDS = "Облигации"
 S_CASH = "Денежные средства и прочее"
-S_OTHER = "Прочее"
+S_OTHER = "Прочие отрасли"
 
 # --- Справочник эмитентов: тикер МосБиржи → (название на русском, сектор) ---
 COMPANIES: dict[str, tuple[str, str]] = {
@@ -190,7 +187,7 @@ SPECIAL_ROWS: dict[str, tuple[str, str, str]] = {
     "#CORP": ("Корпоративные облигации", S_BONDS, ASSET_BONDS),
 }
 CASH_NAME = "Денежные средства и прочие активы"
-REST_NAME = "Прочие активы (вне ТОП-10)"
+REST_NAME = "Прочие активы (вне раскрытого ТОП-10)"
 
 # --- Синонимы названий эмитентов на Investfunds.ru → тикер ---
 ALIASES: dict[str, str] = {
@@ -247,9 +244,9 @@ PREF_MAP = {"SBER": "SBERP", "TATN": "TATNP", "SNGS": "SNGSP", "MTLR": "MTLRP"}
 
 # --- Метаданные фондов: УК, тип, ориентировочная СЧА (млн руб.) ---
 FUND_META: dict[str, dict] = {
-    "Первая — Фонд Топ Российских акций (SBMX)": dict(uk="Первая", type="БПИФ", nav=10450.0),
-    "Первая — Фонд российских акций": dict(uk="Первая", type="ОПИФ", nav=21300.0),
-    "Первая — Фонд акций с выплатой дохода": dict(uk="Первая", type="ОПИФ", nav=3650.0),
+    "Первая — Фонд Топ Российских акций (SBMX)": dict(uk="Первая", type="БПИФ", nav=20540.0),
+    "Первая — Фонд российских акций": dict(uk="Первая", type="ОПИФ", nav=12790.0),
+    "Первая — Фонд акций с выплатой дохода": dict(uk="Первая", type="ОПИФ", nav=22400.0),
     "Первая — Акции средней и малой капитализации (SBSC)": dict(uk="Первая", type="БПИФ", nav=1250.0),
     "ВИМ — Индекс МосБиржи (EQMX)": dict(uk="ВИМ Инвестиции", type="БПИФ", nav=13500.7, nav_date="16.11.2026"),
     "ВИМ — Индекс МосБиржи (ОПИФ)": dict(uk="ВИМ Инвестиции", type="ОПИФ", nav=1380.0),
@@ -262,9 +259,9 @@ FUND_META: dict[str, dict] = {
     "Альфа-Капитал — Акции компаний роста": dict(uk="Альфа-Капитал", type="ОПИФ", nav=2070.0),
     "Альфа-Капитал — Акции с выплатой дохода": dict(uk="Альфа-Капитал", type="ОПИФ", nav=4080.0),
     "Альфа-Капитал (ИПИФ)": dict(uk="Альфа-Капитал", type="ИПИФ", nav=620.0),
-    "Т-Капитал — Индекс МосБиржи (TMOS)": dict(uk="Т-Капитал", type="БПИФ", nav=12300.0),
+    "Т-Капитал — Индекс МосБиржи (TMOS)": dict(uk="Т-Капитал", type="БПИФ", nav=12450.0),
     "Т-Капитал — Акции роста (TITR)": dict(uk="Т-Капитал", type="БПИФ", nav=860.0),
-    "Т-Капитал — Компании второго эшелона": dict(uk="Т-Капитал", type="ОПИФ", nav=740.0),
+    "Т-Капитал — Компании второго эшелона": dict(uk="Т-Капитал", type="ОПИФ", nav=1360.0),
     "АТОН — Российские акции + (AMRE)": dict(uk="АТОН", type="БПИФ", nav=540.0),
     "Райффайзен — Акции": dict(uk="Райффайзен Капитал", type="ОПИФ", nav=9150.0),
     "Промсвязь — Просто. Акции": dict(uk="ПСБ Управление активами", type="ОПИФ", nav=3060.0),
@@ -595,11 +592,37 @@ def _fetch_html(url: str, timeout: int = 20) -> str:
     return resp.text
 
 
+# Строка ТОП-активов на Investfunds.ru всегда описывает бумагу:
+# «Лукойл, акция, [1-01-00077-A]», «Транснефть, акция прив. [...]», «Россия, облигация, [26254RMFS]»
+_ASSET_ROW_RE = re.compile(
+    r",\s*(акци|облигаци|депозитарн|инвестиционн|пай|ипотечн)|акция\s+(об|прив)|\[[0-9A-Z][^\]]{3,}\]",
+    re.IGNORECASE)
+
+
+def _is_asset_name(name: str) -> bool:
+    return bool(_ASSET_ROW_RE.search(name or ""))
+
+
+def _dedupe_items(items: list[tuple[str, float]]) -> list[tuple[str, float]]:
+    """Убирает повторы одной и той же строки (сайт дублирует блоки для мобильной вёрстки)."""
+    seen, out = set(), []
+    for name, w in items:
+        key = (re.sub(r"\s+", " ", name).strip().lower(), round(w, 4))
+        if key not in seen:
+            seen.add(key)
+            out.append((name, w))
+    return out
+
+
 def _parse_top_assets_from_tables(soup: BeautifulSoup) -> list[tuple[str, float]]:
-    """Ищет таблицу с колонками «Основные активы» / «Доля в портфеле, %»."""
-    for table in soup.find_all("table"):
-        head = table.get_text(" ", strip=True)[:400].lower()
-        if "доля в портфеле" not in head and "основные активы" not in head:
+    """
+    Ищет таблицу ТОП-активов: только «листовые» таблицы (без вложенных) после заголовка
+    «Структура фонда»; в расчёт идут только строки с бумагами (акция/облигация/пай…).
+    """
+    anchor = soup.find(string=re.compile(r"Структура\s+фонда", re.I))
+    tables = anchor.find_all_next("table") if anchor else soup.find_all("table")
+    for table in tables:
+        if table.find("table") is not None:
             continue
         items = []
         for tr in table.find_all("tr"):
@@ -608,8 +631,9 @@ def _parse_top_assets_from_tables(soup: BeautifulSoup) -> list[tuple[str, float]
                 continue
             name = tds[0].get_text(" ", strip=True)
             weight = parse_number(tds[-1].get_text(" ", strip=True))
-            if name and weight is not None and 0 < weight <= 100:
+            if _is_asset_name(name) and weight is not None and 0 < weight <= 100:
                 items.append((name, weight))
+        items = _dedupe_items(items)
         if items:
             return items
     return []
@@ -617,7 +641,9 @@ def _parse_top_assets_from_tables(soup: BeautifulSoup) -> list[tuple[str, float]
 
 def _parse_top_assets_from_text(lines: list[str]) -> list[tuple[str, float]]:
     """Запасной вариант: разбор текстового блока «Структура фонда … ТОП-10»."""
-    start = next((i for i, l in enumerate(lines) if "доля в портфеле" in l.lower()), None)
+    start = next((i for i, l in enumerate(lines) if "структура фонда" in l.lower()), None)
+    if start is None:
+        start = next((i for i, l in enumerate(lines) if "доля в портфеле" in l.lower()), None)
     if start is None:
         return []
     items, pending = [], None
@@ -626,15 +652,17 @@ def _parse_top_assets_from_text(lines: list[str]) -> list[tuple[str, float]]:
         if "полная структура" in low or "управляющий фондом" in low or "инфраструктура" in low:
             break
         m = re.match(r"^(.*\S)\s+(\d{1,3}[.,]\d{1,4})$", line)
-        if m and ("," in m.group(1) or "[" in m.group(1)):
+        if m and _is_asset_name(m.group(1)):
             items.append((m.group(1), parse_number(m.group(2))))
             pending = None
         elif re.fullmatch(r"\d{1,3}[.,]\d{1,4}", line) and pending:
             items.append((pending, parse_number(line)))
             pending = None
-        elif re.search(r",\s*(акци|облигаци|депозитарн|пай)", low):
+        elif _is_asset_name(line):
             pending = line
-    return [(n, w) for n, w in items if w is not None and 0 < w <= 100]
+        else:
+            pending = None
+    return _dedupe_items([(n, w) for n, w in items if w is not None and 0 < w <= 100])
 
 
 def parse_fund_html(html: str) -> dict:
@@ -705,9 +733,13 @@ def _rows_from_parsed(fund: str, url: str, info: dict) -> list[dict]:
             merged[key] = {**common, C_TICKER: ticker, C_COMPANY: company,
                            C_SECTOR: sector, C_ASSET: asset, C_WEIGHT: w}
     rows = list(merged.values())
+    total = sum(r[C_WEIGHT] for r in rows)
+    if total > 100.5:  # защита: доли не могут в сумме превышать 100 %
+        for r in rows:
+            r[C_WEIGHT] *= 100.0 / total
     rest = round(100.0 - sum(r[C_WEIGHT] for r in rows), 2)
     if rest > 0.05:
-        rows.append({**common, C_TICKER: NO_TICKER, C_COMPANY: REST_NAME, C_SECTOR: S_OTHER,
+        rows.append({**common, C_TICKER: NO_TICKER, C_COMPANY: REST_NAME, C_SECTOR: S_CASH,
                      C_ASSET: ASSET_OTHER, C_WEIGHT: rest})
     for r in rows:
         r[C_WEIGHT] = round(r[C_WEIGHT], 2)
@@ -935,6 +967,7 @@ TCAP_CDN = "https://cdn.t-capital-funds.ru/static/documents"
 TCAP_REPORTS: dict[str, tuple[str, str]] = {
     "Т-Капитал — Индекс МосБиржи (TMOS)": ("tmos", "4100"),
     "Т-Капитал — Акции роста (TITR)": ("titr", "6126"),
+    "Т-Капитал — Компании второго эшелона": ("smcp", "5991"),
 }
 
 # ISIN → тикер для крупнейших бумаг (остальные — по названию эмитента или через ISS МосБиржи)
@@ -1405,14 +1438,31 @@ def rows_from_uk_page(fund: str, meta: dict, st_: dict, nav_mln, nav_date, page_
             agg[key] = {**common, C_TICKER: tk or NO_TICKER, C_COMPANY: company, C_SECTOR: sector,
                         C_ASSET: ASSET_EQUITY, C_WEIGHT: w}
     rows = list(agg.values())
+    total = sum(r[C_WEIGHT] for r in rows)
+    if total > 100.5:
+        for r in rows:
+            r[C_WEIGHT] *= 100.0 / total
     rest = round(100 - sum(r[C_WEIGHT] for r in rows), 2)
     if rest > 0.05:
-        rows.append({**common, C_TICKER: NO_TICKER, C_COMPANY: "Прочие активы", C_SECTOR: S_OTHER,
+        rows.append({**common, C_TICKER: NO_TICKER, C_COMPANY: REST_NAME, C_SECTOR: S_CASH,
                      C_ASSET: ASSET_OTHER, C_WEIGHT: rest})
     for r in rows:
         r[C_WEIGHT] = round(r[C_WEIGHT], 4)
         r[C_VALUE] = round(nav_mln * r[C_WEIGHT] / 100, 2) if nav_mln else None
     return rows
+
+
+def _catalog_url_for(fund: str) -> str | None:
+    """Ищет страницу фонда на Investfunds.ru в загруженном каталоге по похожему названию."""
+    try:
+        cat = st.session_state.get("catalog")
+    except Exception:  # noqa: BLE001
+        return None
+    if cat is None or cat.empty:
+        return None
+    names = cat[C_FUND].tolist()
+    i, score = match_fund_by_title(fund, names, with_score=True)
+    return cat.iloc[i][C_URL] if score >= 0.5 else None
 
 
 def load_fund_composition(fund: str, meta: dict) -> tuple[list[dict], str, list[str]]:
@@ -1424,7 +1474,11 @@ def load_fund_composition(fund: str, meta: dict) -> tuple[list[dict], str, list[
     Возвращает (строки базы, описание источника, журнал попыток).
     """
     log: list[str] = []
-    inv_url = meta.get(C_URL) or FUNDS_URLS.get(fund)
+    inv_url = meta.get(C_URL)
+    if not is_fund_page(inv_url):
+        inv_url = FUNDS_URLS.get(fund) if is_fund_page(FUNDS_URLS.get(fund)) else _catalog_url_for(fund)
+        if inv_url:
+            meta = {**meta, C_URL: inv_url}
     info = None
     if is_fund_page(inv_url):
         try:
@@ -1432,7 +1486,8 @@ def load_fund_composition(fund: str, meta: dict) -> tuple[list[dict], str, list[
         except Exception as exc:  # noqa: BLE001
             log.append(f"Investfunds.ru: {exc}")
     else:
-        log.append("Investfunds.ru: адрес страницы фонда не указан")
+        log.append("Investfunds.ru: адрес страницы фонда не указан и не найден в каталоге "
+                   "(загрузите список фондов или впишите адрес в FUNDS_URLS)")
     nav_mln = (info or {}).get("nav_mln") or meta.get(C_NAV) or FUND_META.get(fund, {}).get("nav")
     nav_date = (info or {}).get("nav_date") or meta.get(C_NAV_DATE)
     uk_url = UK_PAGES.get(fund) or (info or {}).get("uk_link")
@@ -1490,10 +1545,10 @@ def load_fund_composition(fund: str, meta: dict) -> tuple[list[dict], str, list[
     return [], "", log
 
 
-def match_fund_by_title(title: str | None, candidates: list[str]) -> int:
-    """Индекс фонда, лучше всего совпадающего с названием из справки."""
+def match_fund_by_title(title: str | None, candidates: list[str], with_score: bool = False):
+    """Индекс фонда, лучше всего совпадающего с названием (и, по запросу, степень совпадения 0…1)."""
     if not title or not candidates:
-        return 0
+        return (0, 0.0) if with_score else 0
     stop = {"фонд", "фонда", "паевой", "инвестиционный", "открытый", "биржевой", "интервальный",
             "рыночных", "финансовых", "инструментов", "и", "с", "—", "-", "пиф", "бпиф", "опиф", "ипиф"}
 
@@ -1501,7 +1556,8 @@ def match_fund_by_title(title: str | None, candidates: list[str]) -> int:
         return {t for t in re.findall(r"[а-яa-z0-9]+", s.lower().replace("ё", "е")) if t not in stop}
     t0 = toks(title)
     scores = [len(t0 & toks(c)) / (len(t0 | toks(c)) or 1) for c in candidates]
-    return max(range(len(candidates)), key=lambda i: scores[i])
+    best = max(range(len(candidates)), key=lambda i: scores[i])
+    return (best, scores[best]) if with_score else best
 
 
 # =============================================================================
@@ -1671,11 +1727,24 @@ CUSTOM_CSS = """
     content: "CSV или Excel, до 200 МБ"; display: block; font-size: 0.8em; opacity: 0.7;}
 [data-testid="stFileUploaderDropzone"] button {font-size: 0 !important;}
 [data-testid="stFileUploaderDropzone"] button::after {content: "Выбрать файл"; font-size: 14px;}
+/* Компактная шапка и минимальные отступы */
+[data-testid="stHeader"] {height: 2.2rem; min-height: 2.2rem; background: transparent;}
+.block-container, [data-testid="stMainBlockContainer"] {
+    padding-top: 2.4rem !important; padding-bottom: 1rem !important;}
+[data-testid="stSidebarUserContent"] {padding-top: 0.5rem;}
+[data-testid="stSidebar"] h2 {font-size: 1.05rem; padding: 0.2rem 0;}
+[data-testid="stVerticalBlock"] {gap: 0.55rem;}
+.app-title {font-size: 1.45rem; font-weight: 700; line-height: 1.2; margin: 0;}
+.app-sub {font-size: 0.8rem; opacity: 0.7; margin: 0.1rem 0 0.2rem 0;}
+.sec-title {font-size: 1rem; font-weight: 600; margin: 0.3rem 0 0 0;}
 /* Карточки показателей */
 [data-testid="stMetric"] {
     background: rgba(46, 91, 255, 0.05); border: 1px solid rgba(46, 91, 255, 0.15);
-    border-radius: 10px; padding: 10px 14px;}
-[data-testid="stMetricValue"] {font-size: 1.35rem;}
+    border-radius: 8px; padding: 6px 10px;}
+[data-testid="stMetricValue"] {font-size: 1.12rem; line-height: 1.3;}
+[data-testid="stMetricValue"] > div {white-space: nowrap; overflow: hidden; text-overflow: ellipsis;}
+[data-testid="stMetricLabel"] p {font-size: 0.78rem;}
+[data-testid="stTabs"] [data-baseweb="tab"] {padding-top: 0.2rem; padding-bottom: 0.2rem;}
 </style>
 """
 
@@ -1832,8 +1901,8 @@ def sidebar(meta_all: pd.DataFrame) -> tuple[list[str], list[str]]:
         funds_log = log["funds"]
         ok = {f: v for f, v in funds_log.items() if v[0]}
         full = sum(1 for v in ok.values() if v[0].startswith((SRC_UK_REPORT, SRC_UK_PAGE)))
-        sb.success(f"{log['time']}: загружено {len(ok)} из {len(funds_log)} фондов, "
-                   f"из них с сайтов УК — {full}.")
+        (sb.success if ok else sb.warning)(
+            f"{log['time']}: загружено {len(ok)} из {len(funds_log)} фондов, из них с сайтов УК — {full}.")
         with sb.expander("Подробности загрузки"):
             for fund, (src, notes) in funds_log.items():
                 if src:
@@ -2002,7 +2071,9 @@ def _not_loaded_view(fund: str, meta_row: dict) -> None:
 def tab_funds(fdb: pd.DataFrame, meta: pd.DataFrame) -> None:
     order = meta.sort_values(["loaded", C_NAV], ascending=[False, False], na_position="last")
     options = [TOTAL_FUND] + order[C_FUND].tolist()
-    fund = st.selectbox("Фонд", options, index=1 if len(options) > 1 else 0,
+    sc1, sc2 = st.columns([5, 1])
+    top_n = sc2.number_input("Позиций на диаграмме", 5, 25, 10, step=1)
+    fund = sc1.selectbox("Фонд", options, index=1 if len(options) > 1 else 0,
                         format_func=_fund_label(meta),
                         placeholder="Начните вводить название фонда",
                         help="Первый пункт «ИТОГО» — сводный портфель всех фондов с загруженным составом. "
@@ -2019,37 +2090,32 @@ def tab_funds(fdb: pd.DataFrame, meta: pd.DataFrame) -> None:
     if is_total:
         fd, sm = aggregate_total(fdb)
         nav = sm["nav"]
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Фондов в выборке", f"{sm['n_funds']}", help=f"Типы фондов: {sm['n_types']}")
-        c2.metric("Управляющих компаний", f"{sm['n_uk']}")
-        c3.metric("Суммарная СЧА", fmt_mln(nav, 0), help=f"Даты СЧА: {sm['nav_dates']}")
-        c4.metric("Дата актуальности данных", sm["struct_dates"],
-                  help=f"Даты структуры портфелей. СЧА — {sm['nav_dates']}.")
-        n_missing = int((~meta["loaded"]).sum())
-        if n_missing:
-            st.caption(f"В «ИТОГО» учтены только фонды с загруженным составом: {sm['n_funds']} из {len(meta)}.")
     else:
         fd = fdb[fdb[C_FUND] == fund].sort_values(C_WEIGHT, ascending=False).reset_index(drop=True)
         head = fd.iloc[0]
         nav = head[C_NAV]
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Управляющая компания", head[C_UK])
-        c2.metric("Тип фонда", head[C_TYPE])
-        c3.metric("СЧА", fmt_mln(nav, 0), help=f"Стоимость чистых активов на {head[C_NAV_DATE]}")
-        c4.metric("Дата актуальности данных", head[C_DATE],
-                  help=f"Дата структуры портфеля. СЧА — на {head[C_NAV_DATE]}.")
-
-    service = [CASH_NAME, REST_NAME]
-    real = fd[~fd[C_COMPANY].isin(service)]
     equities = fd[fd[C_ASSET] == ASSET_EQUITY].sort_values(C_WEIGHT, ascending=False)
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Позиций в портфеле" if not is_total else "Уникальных позиций", f"{len(real)}")
-    k2.metric("Доля ТОП-10", fmt_pct(real.head(10)[C_WEIGHT].sum(), 1))
-    k3.metric("Доля акций", fmt_pct(equities[C_WEIGHT].sum(), 1))
+    eq_share = equities[C_WEIGHT].sum()
+    m = st.columns([1.5, 1.25, 1.05, 0.75, 0.85, 0.85, 1.5])
+    if is_total:
+        m[0].metric("Фондов / управляющих компаний", f"{sm['n_funds']} / {sm['n_uk']}",
+                    help=f"Типы фондов: {sm['n_types']}")
+        m[1].metric("Суммарная СЧА", fmt_mln(nav, 0), help=f"Даты СЧА: {sm['nav_dates']}")
+        m[2].metric("Дата данных", sm["struct_dates"], help=f"Даты структуры портфелей. СЧА — {sm['nav_dates']}.")
+    else:
+        m[0].metric(f"Управляющая компания · {head[C_TYPE]}", head[C_UK])
+        m[1].metric("СЧА", fmt_mln(nav, 0), help=f"Стоимость чистых активов на {head[C_NAV_DATE]}")
+        m[2].metric("Дата данных", head[C_DATE], help=f"Дата структуры портфеля. СЧА — на {head[C_NAV_DATE]}.")
+    m[3].metric("Акций", f"{len(equities)}")
+    m[4].metric("Доля ТОП-10", fmt_pct(equities.head(10)[C_WEIGHT].sum(), 1),
+                help="Суммарная доля десяти крупнейших акций")
+    m[5].metric("Доля акций", fmt_pct(min(eq_share, 100.0), 1))
     if not equities.empty:
         big = equities.iloc[0]
-        k4.metric(f"Крупнейшая позиция · {fmt_pct(big[C_WEIGHT], 1)}", big[C_COMPANY],
-                  help=f"{big[C_TICKER]} — {fmt_mln(big[C_VALUE])}")
+        m[6].metric(f"Крупнейшая · {fmt_pct(big[C_WEIGHT], 1)}", big[C_COMPANY],
+                    help=f"{big[C_TICKER]} — {fmt_mln(big[C_VALUE])}")
+    if is_total and int((~meta["loaded"]).sum()):
+        st.caption(f"В «ИТОГО» учтены только фонды с загруженным составом: {sm['n_funds']} из {len(meta)}.")
 
     if is_total:
         st.caption(f"Сводный портфель: позиции всех фондов сложены по оценочной стоимости, "
@@ -2076,20 +2142,22 @@ def tab_funds(fdb: pd.DataFrame, meta: pd.DataFrame) -> None:
             src = head[C_SOURCE]
             st.caption(f"Источник: **{src}**. {SOURCE_NOTES.get(src, '')}")
 
-    st.markdown("#### Структура сводного портфеля" if is_total else "#### Структура портфеля")
     g1, g2 = st.columns([3, 2])
     with g1:
-        top_n = st.slider("Сколько крупнейших позиций показать на диаграмме", 5, 20, 10)
-        pie_src = fd[fd[C_WEIGHT] > 0]
-        top = pie_src.head(top_n)
-        rest_w = pie_src[C_WEIGHT].sum() - top[C_WEIGHT].sum()
+        top = equities[equities[C_WEIGHT] > 0].head(int(top_n))
+        rest_eq = equities.iloc[len(top):]
+        other = fd[fd[C_ASSET] != ASSET_EQUITY]
         labels = top[C_COMPANY].tolist()
         values = top[C_WEIGHT].tolist()
         money = top[C_VALUE].tolist()
-        if rest_w > 0.01:
-            labels.append("Прочие активы")
-            values.append(rest_w)
-            money.append(pie_src[C_VALUE].sum() - top[C_VALUE].sum())
+        if rest_eq[C_WEIGHT].sum() > 0.01:
+            labels.append(f"Остальные акции ({len(rest_eq)})")
+            values.append(rest_eq[C_WEIGHT].sum())
+            money.append(rest_eq[C_VALUE].sum())
+        if other[C_WEIGHT].sum() > 0.01:
+            labels.append(CASH_NAME)
+            values.append(other[C_WEIGHT].sum())
+            money.append(other[C_VALUE].sum())
         fig = go.Figure(go.Pie(
             labels=labels, values=values, customdata=money, hole=0.55, sort=False,
             direction="clockwise", marker=dict(colors=PALETTE, line=dict(color="white", width=1)),
@@ -2099,30 +2167,34 @@ def tab_funds(fdb: pd.DataFrame, meta: pd.DataFrame) -> None:
         ))
         nav_label = "Суммарная СЧА" if is_total else "СЧА"
         fig.update_layout(
-            separators=", ", height=470, margin=dict(t=30, b=10, l=10, r=10),
-            title=dict(text=f"ТОП-{top_n} активов " + ("всех фондов" if is_total else "фонда"),
-                       x=0, font=dict(size=15)),
-            legend=dict(title=dict(text="Эмитенты"), font=dict(size=12)),
+            separators=", ", height=380, margin=dict(t=28, b=0, l=0, r=0),
+            title=dict(text=f"ТОП-{int(top_n)} акций " + ("всех фондов" if is_total else "фонда"),
+                       x=0, font=dict(size=14)),
+            legend=dict(title=dict(text="Эмитенты"), font=dict(size=11)),
             annotations=[dict(text=f"{nav_label}<br><b>{fmt_ru(nav, 0)}</b><br>млн руб.",
-                              showarrow=False, font=dict(size=14))],
+                              showarrow=False, font=dict(size=13))],
         )
         st.plotly_chart(fig, config=PLOTLY_CONFIG, **CHART_W)
     with g2:
-        sec = fd.groupby(C_SECTOR, as_index=False)[[C_WEIGHT, C_VALUE]].sum().sort_values(C_WEIGHT)
+        sec = (fd.assign(**{C_SECTOR: fd[C_SECTOR].where(fd[C_ASSET] == ASSET_EQUITY, CASH_NAME)})
+                 .groupby(C_SECTOR, as_index=False)[[C_WEIGHT, C_VALUE]].sum().sort_values(C_WEIGHT))
         fig_s = px.bar(sec, x=C_WEIGHT, y=C_SECTOR, orientation="h", text=C_WEIGHT,
                        custom_data=[C_VALUE], color_discrete_sequence=["#2E5BFF"])
         fig_s.update_traces(
             texttemplate="%{x:.1f} %", textposition="outside", cliponaxis=False,
             hovertemplate="<b>%{y}</b><br>Доля: %{x:.2f} %<br>Стоимость: %{customdata[0]:,.1f} млн руб.<extra></extra>")
         fig_s.update_layout(
-            separators=", ", height=470 + 20, margin=dict(t=60, b=10, l=10, r=40),
-            title=dict(text="Распределение по секторам", x=0, font=dict(size=15)),
+            separators=", ", height=380, margin=dict(t=28, b=0, l=0, r=40),
+            title=dict(text="Распределение по секторам", x=0, font=dict(size=14)),
             xaxis_title=f"Доля в {pf_word}, %", yaxis_title=None, showlegend=False,
         )
         st.plotly_chart(fig_s, config=PLOTLY_CONFIG, **CHART_W)
 
-    st.markdown("#### Все позиции сводного портфеля" if is_total else "#### Все позиции фонда")
-    q = st.text_input("Поиск по позициям", placeholder="Тикер, компания или сектор…", key="q_fund")
+    t1c, t2c = st.columns([2, 3])
+    t1c.markdown('<p class="sec-title">' + ("Все позиции сводного портфеля" if is_total else "Все позиции фонда")
+                 + "</p>", unsafe_allow_html=True)
+    q = t2c.text_input("Поиск по позициям", placeholder="🔎 Поиск: тикер, компания или сектор…", key="q_fund",
+                       label_visibility="collapsed")
     cols = [C_TICKER, C_COMPANY, C_SECTOR, C_WEIGHT, C_VALUE] + ([C_HOLDERS] if is_total else [])
     table = search_filter(fd[cols], q, [C_TICKER, C_COMPANY, C_SECTOR])
     if is_total:
@@ -2160,14 +2232,14 @@ def _stocks_total_view(agg: pd.DataFrame, fdb: pd.DataFrame) -> None:
                       "<br>Доля от всех акций в фондах: %{customdata[2]:.2f} %"
                       "<br>Фондов-держателей: %{customdata[0]}"
                       "<br>Средняя доля в портфелях: %{customdata[1]:.2f} %<extra></extra>")
-    fig_t.update_layout(separators=", ", height=max(360, 28 * len(top) + 120),
-                        margin=dict(t=50, b=10, l=10, r=60),
+    fig_t.update_layout(separators=", ", height=max(320, 24 * len(top) + 90),
+                        margin=dict(t=30, b=0, l=0, r=60),
                         title=dict(text=f"ТОП-{top_n} бумаг по суммарной стоимости пакетов",
                                    x=0, font=dict(size=15)),
                         xaxis_title="Суммарная стоимость пакетов, млн руб.", yaxis_title=None)
     st.plotly_chart(fig_t, config=PLOTLY_CONFIG, **CHART_W)
 
-    st.markdown("#### Все акции в портфелях фондов")
+    st.markdown('<p class="sec-title">Все акции в портфелях фондов</p>', unsafe_allow_html=True)
     table = agg.reset_index(drop=True).rename(columns={
         "ticker": "Тикер", "company": "Компания", "sector": "Сектор", "funds": C_HOLDERS,
         "total": "Суммарная стоимость пакетов, млн руб.",
@@ -2236,15 +2308,15 @@ def tab_stocks(fdb: pd.DataFrame) -> None:
                       "<br>Доля в портфеле: %{customdata[1]:.2f} %"
                       "<br>Стоимость пакета: %{customdata[2]:,.1f} млн руб.<extra></extra>")
     fig.update_layout(
-        separators=", ", height=max(320, 42 * len(holders) + 140),
-        margin=dict(t=50, b=10, l=10, r=60),
+        separators=", ", height=max(300, 32 * len(holders) + 120),
+        margin=dict(t=30, b=0, l=0, r=60),
         title=dict(text=f"Кто держит {info.company} ({info.ticker})", x=0, font=dict(size=15)),
         xaxis_title=x_title, yaxis_title=None,
         legend=dict(title=dict(text="Управляющая компания"), orientation="h", y=-0.15),
     )
     st.plotly_chart(fig, config=PLOTLY_CONFIG, **CHART_W)
 
-    st.markdown("#### Фонды-держатели")
+    st.markdown('<p class="sec-title">Фонды-держатели</p>', unsafe_allow_html=True)
     table = holders.rename(columns={
         C_FUND: "Название фонда", C_WEIGHT: "Доля в портфеле, %",
         C_VALUE: "Оценочная стоимость пакета, млн руб.", C_URL: "Ссылка на фонд",
@@ -2275,14 +2347,13 @@ def main() -> None:
     db = st.session_state.db
     meta_all = fund_universe(db, st.session_state.catalog)
 
-    st.title("📈 Позиции российских ПИФов в акциях")
     src_counts = db.groupby(C_FUND)[C_SOURCE].first().value_counts()
     parts = [f"{k} — {v}" for k, v in src_counts.items()]
     n_cat = int((~meta_all["loaded"]).sum())
-    st.caption(f"БПИФ, ОПИФ и ИПИФ, инвестирующие в российские акции. Фондов с составом: "
-               f"{db[C_FUND].nunique()} ({'; '.join(parts)})"
-               + (f"; из каталога без состава — {n_cat}" if n_cat else "")
-               + ". Стоимость позиции = СЧА × доля / 100.")
+    st.markdown('<p class="app-title">📈 Позиции российских ПИФов в акциях</p>'
+                f'<p class="app-sub">Фондов с составом: {db[C_FUND].nunique()} ({"; ".join(parts)})'
+                + (f"; в каталоге без состава — {n_cat}" if n_cat else "")
+                + ". Стоимость позиции = СЧА × доля / 100.</p>", unsafe_allow_html=True)
 
     meta = meta_all[meta_all[C_UK].isin(sel_uk) & meta_all[C_TYPE].isin(sel_types)]
     if meta.empty:
